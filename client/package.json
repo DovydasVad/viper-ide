@@ -108,6 +108,16 @@
 				"category": "Viper"
 			},
 			{
+				"command": "viper.toggleDependencyAnalysis",
+				"title": "toggle dependency analysis",
+				"category": "Viper"
+			},
+			{
+				"command": "viper.showDependencyGraph",
+				"title": "show dependency graph",
+				"category": "Viper"
+			},
+			{
 				"command": "viper.openLogFile",
 				"title": "open current logFile",
 				"category": "Viper"
@@ -157,6 +167,16 @@
 				},
 				{
 					"command": "viper.toggleAutoVerify",
+					"when": "resourceLangId == viper",
+					"group": "Viper"
+				},
+				{
+					"command": "viper.toggleDependencyAnalysis",
+					"when": "resourceLangId == viper",
+					"group": "Viper"
+				},
+				{
+					"command": "viper.showDependencyGraph",
 					"when": "resourceLangId == viper",
 					"group": "Viper"
 				},
@@ -314,7 +334,7 @@
 									"name": "verify",
 									"isVerification": true,
 									"mainMethod": "viper.silicon.SiliconRunner",
-									"customArguments": "--z3Exe $z3Exe$ $disableCaching$ $fileToVerify$"
+									"customArguments": "--z3Exe $z3Exe$ $disableCaching$ $dependencyGraphExport$ $fileToVerify$"
 								}
 							],
 							"stoppingTimeout": 5000

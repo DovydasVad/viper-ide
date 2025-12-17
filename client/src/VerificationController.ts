@@ -20,6 +20,7 @@ import { ViperFileState } from './ViperFileState';
 import { Color } from './StatusBar';
 import { Settings } from './Settings';
 import { restart } from './extension';
+import { DependencyAnalysis } from './DependencyAnalysis';
 
 
 export interface ITask {
@@ -725,6 +726,10 @@ export class VerificationController {
                                 State.statusBarItem.update("$(check) " + msg, nofWarnings == 0 ? Color.SUCCESS : Color.WARNING);
                                 if (params.manuallyTriggered > 0) {
                                     Log.hint(msg);
+                                }
+
+                                if (State.activeBackend.type === "silicon" && State.dependencyAnalysis) {
+                                    DependencyAnalysis.performDependencyAnalysis(uri).catch(err => Log.error(`Failed to perform dependency analysis: ${err}`));
                                 }
                                 break;
                             case Success.ParsingFailed:
