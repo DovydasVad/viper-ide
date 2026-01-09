@@ -9,13 +9,18 @@ import { Helper } from './Helper';
 import { Color } from './StatusBar';
 import { TaskType, Task } from './VerificationController';
 
-const highlightDecoration = vscode.window.createTextEditorDecorationType({
+const selectedDecoration = vscode.window.createTextEditorDecorationType({
     backgroundColor: '#00fffb30',
     isWholeLine: true
 });
 
-const neighborDecoration = vscode.window.createTextEditorDecorationType({
+const directDecoration = vscode.window.createTextEditorDecorationType({
     backgroundColor: '#bfff0030',
+    isWholeLine: true
+});
+
+const indirectDecoration = vscode.window.createTextEditorDecorationType({
+    backgroundColor: '#2d3312',
     isWholeLine: true
 });
 
@@ -47,6 +52,14 @@ export class DependencyAnalysis {
     private static fileChangeListener: vscode.Disposable | undefined = undefined;
     private static highlightsEnabled: boolean = false;
     private static analyzedFileUri: vscode.Uri | undefined = undefined;
+    private static isUpdatingHighlights: boolean = false;   // Prevents selection change loops when changing state
+
+    private static getExportDir(fileUri: vscode.Uri): string {
+        const workspaceFolder = vscode.workspace.workspaceFolders 
+            ? vscode.workspace.workspaceFolders[0].uri.fsPath 
+            : path.dirname(fileUri.fsPath);
+        return path.join(workspaceFolder, 'graphExports', 'joined');
+    }
     
     public static async performDependencyAnalysis(fileUri: vscode.Uri): Promise<void> {
         try {
@@ -76,13 +89,8 @@ export class DependencyAnalysis {
         const fileContent = await readFile(fileUri.fsPath, 'utf-8');
         const lines = fileContent.split('\n');
 
-        // Get the workspace folder or file directory
-        const workspaceFolder = vscode.workspace.workspaceFolders 
-            ? vscode.workspace.workspaceFolders[0].uri.fsPath 
-            : path.dirname(fileUri.fsPath);
-
         // Create graphExports/joined/ directory if it does not exist
-        const exportDir = path.join(workspaceFolder, 'graphExports', 'joined');
+        const exportDir = this.getExportDir(fileUri);
         await mkdir(exportDir, { recursive: true });
 
         const csvLines = lines.map((line, index) => {
@@ -99,8 +107,8 @@ export class DependencyAnalysis {
     }
 
     /*
-    Generate graphExports/lines.csv file with the following format:
-    lineNumber,"lineText"
+    Generate graphExports/edges_translated.csv file with the following format:
+    sourceLineNumber, targetLineNumber, dependencyLabel
     */
     private static async translateEdgesToLineNumbers(exportDir: string): Promise<void> {
         try {
@@ -180,15 +188,9 @@ export class DependencyAnalysis {
 
     public static async showDependencyGraph(fileUri: vscode.Uri, exportDir?: string): Promise<void> {
         try {
-            // Store the active editor before opening the panel
-            const activeEditor = vscode.window.activeTextEditor;
-
             // Get export directory if not provided
             if (!exportDir) {
-                const workspaceFolder = vscode.workspace.workspaceFolders 
-                    ? vscode.workspace.workspaceFolders[0].uri.fsPath 
-                    : path.dirname(fileUri.fsPath);
-                exportDir = path.join(workspaceFolder, 'graphExports', 'joined');
+                exportDir = this.getExportDir(fileUri);
             }
 
             // Check if translated edges file exists
@@ -238,39 +240,38 @@ export class DependencyAnalysis {
             const graphData = this.loadGraphFromCSV(translatedEdgesPath);
             this.currentPanel.webview.html = this.getWebviewContent(graphData);
 
-            // Return focus to the editor after a short delay
-            setTimeout(() => {
-                if (activeEditor) {
-                    vscode.window.showTextDocument(activeEditor.document, {
-                        viewColumn: activeEditor.viewColumn,
-                        preserveFocus: false,
-                        preview: false
-                    });
-                }
-            }, 100);
-
             // Handle messages from webview
             this.currentPanel.webview.onDidReceiveMessage(
                 message => {
                     Log.log(`Received message from webview: ${JSON.stringify(message)}`, LogLevel.LowLevelDebug);
                     switch (message.command) {
-                        case 'nodeClicked':
+                        case 'highlightLines':
+                            // User clicked a node in the graph - don't focus/scroll the editor
                             if (!this.highlightsEnabled) {
                                 return;
                             }
-                            this.highlightLines(message.lineNumber, message.neighbors);
+                            this.highlightLines(
+                                message.lineNumber, 
+                                message.neighbors,
+                                message.indirectNeighbors,
+                            );
                             return;
                     }
                 }
             );
 
-            // Listen to editor selection changes
+            // Clear previous listener
             if (this.selectionChangeListener) {
                 this.selectionChangeListener.dispose();
             }
             
             this.selectionChangeListener = vscode.window.onDidChangeTextEditorSelection(event => {
                 if (!this.currentPanel || !this.highlightsEnabled) {
+                    return;
+                }
+                
+                // Skip if highlights are being updated
+                if (this.isUpdatingHighlights) {
                     return;
                 }
 
@@ -288,21 +289,15 @@ export class DependencyAnalysis {
                 
                 Log.log(`Selection changed to line ${lineNumber}`, LogLevel.LowLevelDebug);
                 
-                // Highlight the node
+                // Send message to webview (graph view) to highlight node and calculate dependencies
+                // The webview will calculate dependencies using Cytoscape and send them back
+                // via 'highLightLines' message for code highlighting
                 this.currentPanel.webview.postMessage({
-                    command: 'highlightNode',
+                    command: 'highlightLines',
                     lineNumber: lineNumber
                 });
-
-                // Highlight lines in the editor
-                const dependencies = this.getIncomingDependencies(translatedEdgesPath, lineNumber);
-                
-                if (dependencies.length > 0 || this.lineExists(translatedEdgesPath, lineNumber)) {
-                    this.highlightLines(lineNumber, dependencies);
-                }
             });
 
-            // Listen to document changes to clear highlights when user edits
             if (this.documentChangeListener) {
                 this.documentChangeListener.dispose();
             }
@@ -321,18 +316,20 @@ export class DependencyAnalysis {
                 }
             });
 
-            // Listen to active editor changes to clear highlights when file changes
             if (this.fileChangeListener) {
                 this.fileChangeListener.dispose();
             }
 
-            // Clear highlights when switching files
+            // Clear highlights when switching to a different file
             this.fileChangeListener = vscode.window.onDidChangeActiveTextEditor(editor => {
                 if (!this.currentPanel) {
                     return;
                 }
 
-                this.clearHighlights();                
+                // Only clear if switching to a different file (not when focusing webview or same file)
+                if (editor && this.analyzedFileUri && editor.document.uri.fsPath !== this.analyzedFileUri.fsPath) {
+                    this.clearHighlights();
+                }
             });
 
             Log.log('Dependency graph view opened successfully', LogLevel.Info);
@@ -343,7 +340,7 @@ export class DependencyAnalysis {
     }
 
     public static registerCommands(context: vscode.ExtensionContext): void {
-        context.subscriptions.push(highlightDecoration, neighborDecoration);
+        context.subscriptions.push(selectedDecoration, directDecoration, indirectDecoration);
 
         const showGraphCommand = vscode.commands.registerCommand('viper.showDependencyGraph', async () => {
             const activeEditor = vscode.window.activeTextEditor;
@@ -363,14 +360,14 @@ export class DependencyAnalysis {
     }
 
     public static toggleDependencyAnalysis(): void {
-        const newValue = !State.dependencyAnalysis;
+        const newDependencyAnalysisEnabled = !State.dependencyAnalysis;
         
-        if (newValue && !State.activeBackend) {
+        if (newDependencyAnalysisEnabled && !State.activeBackend) {
             vscode.window.showWarningMessage("No backend is active yet. Please wait for backend initialization.");
             return;
         }
 
-        if (newValue && State.activeBackend && State.activeBackend.type.toLowerCase() !== "silicon") {
+        if (newDependencyAnalysisEnabled && State.activeBackend && State.activeBackend.type.toLowerCase() !== "silicon") {
             vscode.window.showWarningMessage(
                 "Dependency Analysis can only be enabled with the Silicon backend. Current backend: " + State.activeBackend.name,
                 "Switch to Silicon"
@@ -383,12 +380,12 @@ export class DependencyAnalysis {
             return;
         }
         
-        State.dependencyAnalysis = newValue;
+        State.dependencyAnalysis = newDependencyAnalysisEnabled;
         State.statusBarItem.update("Dependency Analysis is " + (State.dependencyAnalysis ? "on" : "off"), Color.SUCCESS);
         Log.log("Dependency Analysis " + (State.dependencyAnalysis ? "enabled" : "disabled"), LogLevel.Info);
         
         // Trigger reverification when dependency analysis is enabled
-        if (newValue) {
+        if (newDependencyAnalysisEnabled) {
             const fileUri = Helper.getActiveFileUri();
             if (fileUri && Helper.isViperSourceFile(fileUri)) {
                 Log.log("Dependency Analysis enabled - triggering reverification", LogLevel.Info);
@@ -467,107 +464,83 @@ export class DependencyAnalysis {
         };
     }
 
-    private static getIncomingDependencies(csvPath: string, lineNumber: number): number[] {
-        if (!fs.existsSync(csvPath)) {
-            return [];
-        }
-
-        const csvContent = fs.readFileSync(csvPath, 'utf-8');
-        const lines = csvContent.trim().split('\n');
+    private static highlightLines(lineNumber: number, neighbors: number[], indirectNeighbors: number[] = []): void {
+        // Set flag to prevent selection change listener from triggering while updating
+        this.isUpdatingHighlights = true;
         
-        const dependencySet = new Set<number>();
-        const startIndex = lines[0].includes('source') ? 1 : 0;
-
-        for (let i = startIndex; i < lines.length; i++) {
-            const parts = lines[i].split(',');
-            if (parts.length < 2) continue;
-            
-            const source = parseInt(parts[0].trim());
-            const target = parseInt(parts[1].trim());
-            
-            // If target is our line, then source is a dependency
-            if (target === lineNumber && !isNaN(source)) {
-                dependencySet.add(source);
-            }
-        }
-
-        return Array.from(dependencySet);
-    }
-
-    private static lineExists(csvPath: string, lineNumber: number): boolean {
-        if (!fs.existsSync(csvPath)) {
-            return false;
-        }
-
-        const csvContent = fs.readFileSync(csvPath, 'utf-8');
-        const lines = csvContent.trim().split('\n');
-        const startIndex = lines[0].includes('source') ? 1 : 0;
-
-        for (let i = startIndex; i < lines.length; i++) {
-            const parts = lines[i].split(',');
-            if (parts.length < 2) continue;
-            
-            const source = parseInt(parts[0].trim());
-            const target = parseInt(parts[1].trim());
-            
-            if (source === lineNumber || target === lineNumber) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static highlightLines(lineNumber: number, neighbors: number[]): void {
-        const editor = vscode.window.activeTextEditor;
-        if (!editor) {
-            Log.log('No active editor found', LogLevel.Debug);
-            return;
-        }
-
-        Log.log(`Highlighting line ${lineNumber} with neighbors: ${neighbors}`, LogLevel.LowLevelDebug);
-
-        // Check if line numbers are valid
-        const lineCount = editor.document.lineCount;
-        if (lineNumber < 1 || lineNumber > lineCount) {
-            Log.log(`Invalid line number: ${lineNumber} (document has ${lineCount} lines)`, LogLevel.Debug);
-            vscode.window.showWarningMessage(`Line ${lineNumber} is out of range`);
-            return;
-        }
-
         try {
-            const mainLine = [{ range: editor.document.lineAt(lineNumber - 1).range }];
-            const neighborLines = neighbors
-                .filter(n => n >= 1 && n <= lineCount)
+            // Find the editor for the analyzed file, not just the active editor
+            // This is important when the webview panel is focused instead of the text editor
+            let editor = vscode.window.activeTextEditor;
+            
+            // If no active editor or it's not the analyzed file, find the correct editor
+            if (!editor || !this.analyzedFileUri || editor.document.uri.fsPath !== this.analyzedFileUri.fsPath) {
+                // Look for an editor with the analyzed file
+                editor = vscode.window.visibleTextEditors.find(
+                    e => this.analyzedFileUri && e.document.uri.fsPath === this.analyzedFileUri.fsPath
+                );
+            }
+            
+            if (!editor) {
+                Log.log('No editor found for analyzed file', LogLevel.Debug);
+                return;
+            }
+
+            Log.log(`Highlighting line ${lineNumber} with neighbors: ${neighbors}, indirect: ${indirectNeighbors}`, LogLevel.LowLevelDebug);
+
+            // Check if line numbers are valid
+            const lineCount = editor.document.lineCount;
+            if (lineNumber < 1 || lineNumber > lineCount) {
+                Log.log(`Invalid line number: ${lineNumber} (document has ${lineCount} lines)`, LogLevel.Debug);
+                vscode.window.showWarningMessage(`Line ${lineNumber} is out of range`);
+                return;
+            }
+
+            const selectedLine = [{ range: editor.document.lineAt(lineNumber - 1).range }];
+            const directLines = neighbors
+                .filter(n => n >= 1 && n <= lineCount && n !== lineNumber)
+                .map(n => ({ 
+                    range: editor.document.lineAt(n - 1).range 
+                }));
+            const indirectLines = indirectNeighbors
+                .filter(n => n >= 1 && n <= lineCount && n !== lineNumber)
                 .map(n => ({ 
                     range: editor.document.lineAt(n - 1).range 
                 }));
 
-            editor.setDecorations(highlightDecoration, mainLine);
-            editor.setDecorations(neighborDecoration, neighborLines);
+            editor.setDecorations(directDecoration, directLines);
+            editor.setDecorations(indirectDecoration, indirectLines);
+            editor.setDecorations(selectedDecoration, selectedLine);
 
             // Scroll to the line and focus the editor
             editor.revealRange(editor.document.lineAt(lineNumber - 1).range, vscode.TextEditorRevealType.InCenter);
             
-            // Focus the editor window so decorations are visible immediately
-            vscode.window.showTextDocument(editor.document, {
-                viewColumn: editor.viewColumn,
-                preserveFocus: false,
-                preview: false
-            });
-            
-            Log.log(`Successfully highlighted line ${lineNumber} and ${neighborLines.length} neighbors`, LogLevel.LowLevelDebug);
+            Log.log(`Successfully highlighted line ${lineNumber}, ${directLines.length} direct dependencies, and ${indirectLines.length} indirect dependencies`, LogLevel.LowLevelDebug);
         } catch (error) {
             Log.error(`Error highlighting lines: ${error}`);
             vscode.window.showErrorMessage(`Error highlighting lines: ${error}`);
+        } finally {
+            // Reset flag after a short delay to allow any triggered events to be ignored
+            setTimeout(() => {
+                this.isUpdatingHighlights = false;
+            }, 100);
         }
     }
 
     private static clearHighlights(): void {
-        const editor = vscode.window.activeTextEditor;
+        // Find the editor for the analyzed file, similar to highlightLines()
+        let editor = vscode.window.activeTextEditor;
+        
+        if (!editor || !this.analyzedFileUri || editor.document.uri.fsPath !== this.analyzedFileUri.fsPath) {
+            editor = vscode.window.visibleTextEditors.find(
+                e => this.analyzedFileUri && e.document.uri.fsPath === this.analyzedFileUri.fsPath
+            );
+        }
+        
         if (editor) {
-            editor.setDecorations(highlightDecoration, []);
-            editor.setDecorations(neighborDecoration, []);
+            editor.setDecorations(directDecoration, []);
+            editor.setDecorations(indirectDecoration, []);
+            editor.setDecorations(selectedDecoration, []);
             Log.log('Cleared dependency highlights', LogLevel.LowLevelDebug);
         }
     }
@@ -586,6 +559,9 @@ export class DependencyAnalysis {
             ${styles}
         </head>
         <body>
+            <div id="controls">
+                <button id="toggleIndirect" title="Toggle indirect dependencies">Show Indirect</button>
+            </div>
             <div id="cy"></div>
             <div id="tooltip"></div>
             ${graphScript}
@@ -604,6 +580,32 @@ export class DependencyAnalysis {
                 width: 100%;
                 height: 100vh;
                 background-color: #1e1e1e;
+            }
+            #controls {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                z-index: 1000;
+                display: flex;
+                gap: 8px;
+            }
+            #controls button {
+                background-color: #2d2d30;
+                color: #cccccc;
+                border: 1px solid #454545;
+                border-radius: 4px;
+                padding: 8px 12px;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-size: 12px;
+                cursor: pointer;
+                transition: background-color 0.2s;
+            }
+            #controls button:hover {
+                background-color: #3e3e42;
+            }
+            #controls button.active {
+                background-color: #0e639c;
+                border-color: #007acc;
             }
             #tooltip {
                 position: absolute;
@@ -645,6 +647,72 @@ export class DependencyAnalysis {
                 layout: ${this.getGraphLayout()}
             });
 
+            // Track whether indirect dependencies are shown
+            let showIndirect = false;
+            
+            // Track the currently selected node for toggle button recalculation
+            let selectedNode = null;
+            
+            // Shared function to highlight a node and its dependencies
+            function highlightNodeAndDependencies(node, sendMessage = true) {
+                if (!node || node.length === 0) return;
+                
+                const lineNumber = parseInt(node.id());
+                
+                // Clear previous highlights and dimming
+                cy.elements().removeClass('highlighted neighbor indirect dimmed');
+                
+                // Get dependencies based on mode
+                let incomers, directIncomers;
+                if (showIndirect) {
+                    incomers = node.predecessors();
+                    directIncomers = node.incomers();
+                } else {
+                    // Get only direct incoming dependencies
+                    incomers = node.incomers();
+                    directIncomers = incomers;
+                }
+                
+                // Get connected elements (node, dependencies, and edges between them)
+                const connectedElements = node.union(incomers);
+                
+                // Dim all elements first
+                cy.elements().addClass('dimmed');
+                
+                // Remove dimming from connected elements (includes edges automatically)
+                connectedElements.removeClass('dimmed');
+                
+                // Highlight indirect dependencies (if in indirect mode)
+                if (showIndirect) {
+                    const indirectNodes = incomers.nodes().difference(directIncomers.nodes());
+                    indirectNodes.addClass('indirect');
+                }
+
+                // Highlight direct dependencies
+                directIncomers.nodes().addClass('neighbor');
+
+                node.addClass('highlighted');
+                
+                // Send message to extension for code highlighting
+                if (sendMessage) {
+                    const directNeighbors = directIncomers.nodes()
+                        .map(n => parseInt(n.id()));
+                    const indirectNeighbors = showIndirect 
+                        ? incomers.nodes()
+                            .difference(directIncomers.nodes())
+                            .map(n => parseInt(n.id()))
+                        : [];
+                    
+                    vscode.postMessage({
+                        command: 'highlightLines',
+                        lineNumber: lineNumber,
+                        neighbors: directNeighbors,
+                        indirectNeighbors: indirectNeighbors
+                    });
+                }
+            }
+
+            ${this.getToggleButtonHandler()}
             ${this.getTooltipHandlers()}
             ${this.getNodeClickHandler()}
             ${this.getMessageHandler()}
@@ -677,11 +745,11 @@ export class DependencyAnalysis {
                 }
             },
             {
-                selector: '.highlighted',
+                selector: '.indirect',
                 style: {
-                    'background-color': '#2b7372',
-                    'width': 60,
-                    'height': 60
+                    'background-color': '#2d3312',
+                    'width': 52,
+                    'height': 52
                 }
             },
             {
@@ -690,6 +758,14 @@ export class DependencyAnalysis {
                     'background-color': '#505f21',
                     'width': 55,
                     'height': 55
+                }
+            },
+            {
+                selector: '.highlighted',
+                style: {
+                    'background-color': '#2b7372',
+                    'width': 60,
+                    'height': 60
                 }
             },
             {
@@ -708,6 +784,24 @@ export class DependencyAnalysis {
             idealEdgeLength: 100,
             nodeOverlap: 20
         });
+    }
+
+    private static getToggleButtonHandler(): string {
+        return `const toggleBtn = document.getElementById('toggleIndirect');
+            
+            toggleBtn.addEventListener('click', function() {
+                showIndirect = !showIndirect;
+                this.classList.toggle('active', showIndirect);
+                this.textContent = showIndirect ? 'Hide Indirect' : 'Show Indirect';
+                
+                // Recalculate and highlight dependencies for the currently selected node
+                if (selectedNode && selectedNode.length > 0) {
+                    highlightNodeAndDependencies(selectedNode, true);
+                } else {
+                    // Just clear highlights if no node is selected
+                    cy.elements().removeClass('highlighted neighbor indirect dimmed');
+                }
+            });`;
     }
 
     private static getTooltipHandlers(): string {
@@ -744,33 +838,12 @@ export class DependencyAnalysis {
     private static getNodeClickHandler(): string {
         return `cy.on('tap', 'node', function(evt) {
                 const node = evt.target;
-                const lineNumber = parseInt(node.id());
                 
-                // Get only incoming neighbors (nodes that point to this node)
-                const incomingNeighbors = node.incomers('node').map(n => parseInt(n.id()));
+                // Track the selected node for toggle button recalculation
+                selectedNode = node;
                 
-                // Clear previous highlights and dimming
-                cy.elements().removeClass('highlighted neighbor dimmed');
-                
-                // Get connected elements (clicked node, incoming neighbors, and edges between them)
-                const connectedElements = node.union(node.incomers());
-                
-                // Dim all elements first
-                cy.elements().addClass('dimmed');
-                
-                // Remove dimming from connected elements (includes edges automatically)
-                connectedElements.removeClass('dimmed');
-                
-                // Highlight clicked node and incoming neighbors
-                node.addClass('highlighted');
-                node.incomers('node').addClass('neighbor');
-                
-                // Send message to extension
-                vscode.postMessage({
-                    command: 'nodeClicked',
-                    lineNumber: lineNumber,
-                    neighbors: incomingNeighbors
-                });
+                // Highlight the node and its dependencies
+                highlightNodeAndDependencies(node, true);
             });`;
     }
 
@@ -780,30 +853,16 @@ export class DependencyAnalysis {
                 const message = event.data;
                 
                 switch (message.command) {
-                    case 'highlightNode':
+                    case 'highlightLines':
                         const nodeId = message.lineNumber.toString();
                         const node = cy.getElementById(nodeId);
                         
                         if (node.length > 0) {
-                            // Clear previous highlights
-                            cy.elements().removeClass('highlighted neighbor dimmed');
-                            
-                            // Get incoming neighbors and edges
-                            const incomers = node.incomers(); // This includes both nodes and edges
-                            const incomingNeighbors = incomers.nodes();
-                            
-                            // Get connected elements (selected node, incoming neighbors, and edges between them)
-                            const connectedElements = node.union(incomers);
-                            
-                            // Dim all elements first
-                            cy.elements().addClass('dimmed');
-                            
-                            // Remove dimming from connected elements (includes edges automatically)
-                            connectedElements.removeClass('dimmed');
+                            // Track the selected node for toggle button recalculation
+                            selectedNode = node;
                             
                             // Highlight the node and its dependencies
-                            node.addClass('highlighted');
-                            incomingNeighbors.addClass('neighbor');
+                            highlightNodeAndDependencies(node, true);
                             
                             // Only center if node is far from the viewport center
                             const extent = cy.extent();
