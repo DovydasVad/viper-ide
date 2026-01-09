@@ -14,13 +14,23 @@ const selectedDecoration = vscode.window.createTextEditorDecorationType({
     isWholeLine: true
 });
 
-const directDecoration = vscode.window.createTextEditorDecorationType({
+const directDependencyDecoration = vscode.window.createTextEditorDecorationType({
     backgroundColor: '#bfff0030',
     isWholeLine: true
 });
 
-const indirectDecoration = vscode.window.createTextEditorDecorationType({
-    backgroundColor: '#2d3312',
+const indirectDependencyDecoration = vscode.window.createTextEditorDecorationType({
+    backgroundColor: '#2b3312',
+    isWholeLine: true
+});
+
+const directDependantDecoration = vscode.window.createTextEditorDecorationType({
+    backgroundColor: '#ffdd0030',
+    isWholeLine: true
+});
+
+const indirectDependantDecoration = vscode.window.createTextEditorDecorationType({
+    backgroundColor: '#332f12',
     isWholeLine: true
 });
 
@@ -254,6 +264,7 @@ export class DependencyAnalysis {
                                 message.lineNumber, 
                                 message.neighbors,
                                 message.indirectNeighbors,
+                                message.showDependents
                             );
                             return;
                     }
@@ -340,7 +351,8 @@ export class DependencyAnalysis {
     }
 
     public static registerCommands(context: vscode.ExtensionContext): void {
-        context.subscriptions.push(selectedDecoration, directDecoration, indirectDecoration);
+        context.subscriptions.push(selectedDecoration, directDependencyDecoration, indirectDependencyDecoration,
+            directDependantDecoration, indirectDependantDecoration);
 
         const showGraphCommand = vscode.commands.registerCommand('viper.showDependencyGraph', async () => {
             const activeEditor = vscode.window.activeTextEditor;
@@ -464,7 +476,7 @@ export class DependencyAnalysis {
         };
     }
 
-    private static highlightLines(lineNumber: number, neighbors: number[], indirectNeighbors: number[] = []): void {
+    private static highlightLines(lineNumber: number, neighbors: number[], indirectNeighbors: number[] = [], showDependents: boolean = false): void {
         // Set flag to prevent selection change listener from triggering while updating
         this.isUpdatingHighlights = true;
         
@@ -508,6 +520,14 @@ export class DependencyAnalysis {
                     range: editor.document.lineAt(n - 1).range 
                 }));
 
+            // Choose decorations based on direction mode
+            const directDecoration = showDependents ? directDependantDecoration : directDependencyDecoration;
+            const indirectDecoration = showDependents ? indirectDependantDecoration : indirectDependencyDecoration;
+
+            // Clear all decorations first to avoid leftover highlights from previous mode
+            this.clearEditorDecorations(editor);
+
+            // Apply new decorations
             editor.setDecorations(directDecoration, directLines);
             editor.setDecorations(indirectDecoration, indirectLines);
             editor.setDecorations(selectedDecoration, selectedLine);
@@ -515,7 +535,8 @@ export class DependencyAnalysis {
             // Scroll to the line and focus the editor
             editor.revealRange(editor.document.lineAt(lineNumber - 1).range, vscode.TextEditorRevealType.InCenter);
             
-            Log.log(`Successfully highlighted line ${lineNumber}, ${directLines.length} direct dependencies, and ${indirectLines.length} indirect dependencies`, LogLevel.LowLevelDebug);
+            const modeText = showDependents ? 'dependents' : 'dependencies';
+            Log.log(`Successfully highlighted line ${lineNumber}, ${directLines.length} direct ${modeText}, and ${indirectLines.length} indirect ${modeText}`, LogLevel.LowLevelDebug);
         } catch (error) {
             Log.error(`Error highlighting lines: ${error}`);
             vscode.window.showErrorMessage(`Error highlighting lines: ${error}`);
@@ -538,11 +559,18 @@ export class DependencyAnalysis {
         }
         
         if (editor) {
-            editor.setDecorations(directDecoration, []);
-            editor.setDecorations(indirectDecoration, []);
-            editor.setDecorations(selectedDecoration, []);
+            // Clear all decoration types
+            this.clearEditorDecorations(editor);
             Log.log('Cleared dependency highlights', LogLevel.LowLevelDebug);
         }
+    }
+
+    private static clearEditorDecorations(editor: vscode.TextEditor): void {
+        editor.setDecorations(directDependencyDecoration, []);
+        editor.setDecorations(indirectDependencyDecoration, []);
+        editor.setDecorations(directDependantDecoration, []);
+        editor.setDecorations(indirectDependantDecoration, []);
+        editor.setDecorations(selectedDecoration, []);
     }
 
     private static getWebviewContent(graphData: GraphData): string {
@@ -561,6 +589,7 @@ export class DependencyAnalysis {
         <body>
             <div id="controls">
                 <button id="toggleIndirect" title="Toggle indirect dependencies">Show Indirect</button>
+                <button id="toggleDirection" title="Switch between dependencies and dependents">Show Dependents</button>
             </div>
             <div id="cy"></div>
             <div id="tooltip"></div>
@@ -637,7 +666,7 @@ export class DependencyAnalysis {
     private static getGraphScript(graphData: GraphData): string {
         const graphDataJson = JSON.stringify(graphData);
         
-        return `<script>
+        return /* javascript */`<script>                                // Tip: install VSC extension 'es6-string-html' to see syntax highlighting for these multi-line strings
             const vscode = acquireVsCodeApi();
             
             const cy = cytoscape({
@@ -650,31 +679,45 @@ export class DependencyAnalysis {
             // Track whether indirect dependencies are shown
             let showIndirect = false;
             
+            // Track direction: false = dependencies (incoming), true = dependents (outgoing)
+            let showDependents = false;
+            
             // Track the currently selected node for toggle button recalculation
             let selectedNode = null;
             
-            // Shared function to highlight a node and its dependencies
+            // Shared function to highlight a node and its dependencies/dependents
             function highlightNodeAndDependencies(node, sendMessage = true) {
                 if (!node || node.length === 0) return;
                 
                 const lineNumber = parseInt(node.id());
                 
                 // Clear previous highlights and dimming
-                cy.elements().removeClass('highlighted neighbor indirect dimmed');
+                cy.elements().removeClass('selected direct indirect direct-dependent indirect-dependent dimmed');
                 
-                // Get dependencies based on mode
-                let incomers, directIncomers;
-                if (showIndirect) {
-                    incomers = node.predecessors();
-                    directIncomers = node.incomers();
+                // Get related nodes based on direction and mode
+                let related, directRelated;
+                if (showDependents) {
+                    // Dependents mode: show outgoing edges
+                    if (showIndirect) {
+                        related = node.successors();
+                        directRelated = node.outgoers();
+                    } else {
+                        related = node.outgoers();
+                        directRelated = related;
+                    }
                 } else {
-                    // Get only direct incoming dependencies
-                    incomers = node.incomers();
-                    directIncomers = incomers;
+                    // Dependencies mode: show incoming edges
+                    if (showIndirect) {
+                        related = node.predecessors();
+                        directRelated = node.incomers();
+                    } else {
+                        related = node.incomers();
+                        directRelated = related;
+                    }
                 }
                 
-                // Get connected elements (node, dependencies, and edges between them)
-                const connectedElements = node.union(incomers);
+                // Get connected elements (node, related nodes, and edges between them)
+                const connectedElements = node.union(related);
                 
                 // Dim all elements first
                 cy.elements().addClass('dimmed');
@@ -682,24 +725,28 @@ export class DependencyAnalysis {
                 // Remove dimming from connected elements (includes edges automatically)
                 connectedElements.removeClass('dimmed');
                 
-                // Highlight indirect dependencies (if in indirect mode)
+                // Choose CSS classes based on direction mode
+                const indirectClass = showDependents ? 'indirect-dependent' : 'indirect';
+                const directClass = showDependents ? 'direct-dependent' : 'direct';
+                
+                // Highlight indirect nodes (if in indirect mode)
                 if (showIndirect) {
-                    const indirectNodes = incomers.nodes().difference(directIncomers.nodes());
-                    indirectNodes.addClass('indirect');
+                    const indirectNodes = related.nodes().difference(directRelated.nodes());
+                    indirectNodes.addClass(indirectClass);
                 }
 
-                // Highlight direct dependencies
-                directIncomers.nodes().addClass('neighbor');
+                // Highlight direct related nodes
+                directRelated.nodes().addClass(directClass);
 
-                node.addClass('highlighted');
+                node.addClass('selected');
                 
                 // Send message to extension for code highlighting
                 if (sendMessage) {
-                    const directNeighbors = directIncomers.nodes()
+                    const directNeighbors = directRelated.nodes()
                         .map(n => parseInt(n.id()));
                     const indirectNeighbors = showIndirect 
-                        ? incomers.nodes()
-                            .difference(directIncomers.nodes())
+                        ? related.nodes()
+                            .difference(directRelated.nodes())
                             .map(n => parseInt(n.id()))
                         : [];
                     
@@ -707,11 +754,13 @@ export class DependencyAnalysis {
                         command: 'highlightLines',
                         lineNumber: lineNumber,
                         neighbors: directNeighbors,
-                        indirectNeighbors: indirectNeighbors
+                        indirectNeighbors: indirectNeighbors,
+                        showDependents: showDependents
                     });
                 }
             }
 
+            ${this.getDirectionToggleHandler()}
             ${this.getToggleButtonHandler()}
             ${this.getTooltipHandlers()}
             ${this.getNodeClickHandler()}
@@ -745,6 +794,14 @@ export class DependencyAnalysis {
                 }
             },
             {
+                selector: '.direct',
+                style: {
+                    'background-color': '#505f21',
+                    'width': 55,
+                    'height': 55
+                }
+            },
+            {
                 selector: '.indirect',
                 style: {
                     'background-color': '#2d3312',
@@ -753,15 +810,23 @@ export class DependencyAnalysis {
                 }
             },
             {
-                selector: '.neighbor',
+                selector: '.direct-dependent',
                 style: {
-                    'background-color': '#505f21',
+                    'background-color': '#5f5721',
                     'width': 55,
                     'height': 55
                 }
             },
             {
-                selector: '.highlighted',
+                selector: '.indirect-dependent',
+                style: {
+                    'background-color': '#332f12',
+                    'width': 52,
+                    'height': 52
+                }
+            },
+            {
+                selector: '.selected',
                 style: {
                     'background-color': '#2b7372',
                     'width': 60,
@@ -786,8 +851,26 @@ export class DependencyAnalysis {
         });
     }
 
+    private static getDirectionToggleHandler(): string {
+        return /* javascript */`const toggleDirectionBtn = document.getElementById('toggleDirection');
+            
+            toggleDirectionBtn.addEventListener('click', function() {
+                showDependents = !showDependents;
+                this.classList.toggle('active', showDependents);
+                this.textContent = showDependents ? 'Show Dependencies' : 'Show Dependents';
+                
+                // Recalculate and highlight for the currently selected node
+                if (selectedNode && selectedNode.length > 0) {
+                    highlightNodeAndDependencies(selectedNode, true);
+                } else {
+                    // Just clear highlights if no node is selected
+                    cy.elements().removeClass('selected direct indirect dimmed');
+                }
+            });`;
+    }
+
     private static getToggleButtonHandler(): string {
-        return `const toggleBtn = document.getElementById('toggleIndirect');
+        return /* javascript */`const toggleBtn = document.getElementById('toggleIndirect');
             
             toggleBtn.addEventListener('click', function() {
                 showIndirect = !showIndirect;
@@ -799,13 +882,13 @@ export class DependencyAnalysis {
                     highlightNodeAndDependencies(selectedNode, true);
                 } else {
                     // Just clear highlights if no node is selected
-                    cy.elements().removeClass('highlighted neighbor indirect dimmed');
+                    cy.elements().removeClass('selected direct indirect dimmed');
                 }
             });`;
     }
 
     private static getTooltipHandlers(): string {
-        return `const tooltip = document.getElementById('tooltip');
+        return /* javascript */`const tooltip = document.getElementById('tooltip');
             
             cy.on('mouseover', 'node', function(evt) {
                 const node = evt.target;
@@ -836,7 +919,7 @@ export class DependencyAnalysis {
     }
 
     private static getNodeClickHandler(): string {
-        return `cy.on('tap', 'node', function(evt) {
+        return /* javascript */`cy.on('tap', 'node', function(evt) {
                 const node = evt.target;
                 
                 // Track the selected node for toggle button recalculation
@@ -848,7 +931,7 @@ export class DependencyAnalysis {
     }
 
     private static getMessageHandler(): string {
-        return `// Listen for messages from extension to highlight nodes
+        return /* javascript */`// Listen for messages from extension to highlight nodes
             window.addEventListener('message', event => {
                 const message = event.data;
                 
