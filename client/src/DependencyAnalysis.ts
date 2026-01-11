@@ -77,7 +77,12 @@ export class DependencyAnalysis {
             Log.log(`Starting dependency analysis for ${path.basename(fileUri.fsPath)}`, LogLevel.Info);
             
             const exportDir = await this.exportLinesToCSV(fileUri);
-            await this.translateEdgesToLineNumbers(exportDir);            
+            await this.translateEdgesToLineNumbers(exportDir);
+            
+            // Ensure the opened file is open in the code view before showing the graph (that is, does not replace previously opened graph view)
+            const document = await vscode.workspace.openTextDocument(fileUri);
+            await vscode.window.showTextDocument(document, vscode.ViewColumn.One, false);
+            
             await this.showDependencyGraph(fileUri, exportDir);
             
             // Store the analyzed file and re-enable highlights after successful analysis
