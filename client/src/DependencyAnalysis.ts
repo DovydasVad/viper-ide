@@ -37,8 +37,9 @@ const indirectDependantDecoration = vscode.window.createTextEditorDecorationType
 interface GraphNode {
     data: {
         id: string;
-        label: string;
-        content?: string; // Line content from lines.csv
+        lineNumber: number;
+        lineType: string;
+        content?: string;
     };
 }
 
@@ -462,7 +463,8 @@ export class DependencyAnalysis {
             nodes: Array.from(nodes).map(id => ({ 
                 data: { 
                     id: id.toString(), 
-                    label: `${id}`,
+                    lineNumber: id,
+                    lineType: this.getLineType(lineContents.get(id) || ''),
                     content: lineContents.get(id) || '' 
                 } 
             })),
@@ -474,6 +476,36 @@ export class DependencyAnalysis {
                 } 
             }))
         };
+    }
+
+    private static getLineType(lineContent: string): string {
+        const trimmedLine = lineContent.trim();
+        
+        if (!trimmedLine) {
+            return 'other';
+        }
+        
+        // Match the first word
+        const match = trimmedLine.match(/^\S+/);
+        let lineType = match ? match[0] : 'other';
+        
+        if (lineType === 'var') {
+            // Include the variable name (second word)
+            const secondWordMatch = trimmedLine.match(/^\S+\s+(\S+)/);
+            if (secondWordMatch) {
+                let secondWord = secondWordMatch[1];
+                if (secondWord.endsWith(':')) {
+                    secondWord = secondWord.slice(0, -1);
+                }
+                lineType = lineType + ' ' + secondWord;
+            }
+        }
+        
+        if (lineType.length > 12 && lineContent.includes(':=')) {
+            lineType = ':=';
+        }
+        
+        return lineType;
     }
 
     private static highlightLines(lineNumber: number, neighbors: number[], indirectNeighbors: number[] = [], showDependents: boolean = false): void {
@@ -646,7 +678,8 @@ export class DependencyAnalysis {
                 padding: 8px 12px;
                 font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
                 font-size: 12px;
-                white-space: pre;
+                white-space: pre-wrap;
+                word-wrap: break-word;
                 max-width: 500px;
                 z-index: 1000;
                 pointer-events: none;
@@ -672,7 +705,83 @@ export class DependencyAnalysis {
             const cy = cytoscape({
                 container: document.getElementById('cy'),
                 elements: ${graphDataJson},
-                style: ${this.getGraphStyles()},
+                style: [
+                    {
+                        selector: 'node',
+                        style: {
+                            'background-color': '#474747',
+                            'background-image': function(element) {
+                                const lineNum = element.data('lineNumber');
+                                const lineType = element.data('lineType');
+                                const svg = '<svg width="80" height="80" xmlns="http://www.w3.org/2000/svg">' +
+                                          '<text x="40" y="35" text-anchor="middle" font-size="16" fill="white" font-family="Arial">' + lineNum + '</text>' +
+                                          '<text x="40" y="52" text-anchor="middle" font-size="10" fill="white" font-family="Arial">' + lineType + '</text>' +
+                                          '</svg>';
+                                return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+                            },
+                            'background-fit': 'contain',
+                            'background-clip': 'none',
+                            'width': 50,
+                            'height': 50
+                        }
+                    },
+                    {
+                        selector: 'edge',
+                        style: {
+                            'width': 2,
+                            'line-color': '#505050',
+                            'target-arrow-color': '#505050',
+                            'target-arrow-shape': 'triangle',
+                            'curve-style': 'bezier'
+                        }
+                    },
+                    {
+                        selector: '.direct',
+                        style: {
+                            'background-color': '#505f21',
+                            'width': 55,
+                            'height': 55
+                        }
+                    },
+                    {
+                        selector: '.indirect',
+                        style: {
+                            'background-color': '#2d3312',
+                            'width': 52,
+                            'height': 52
+                        }
+                    },
+                    {
+                        selector: '.direct-dependent',
+                        style: {
+                            'background-color': '#5f5721',
+                            'width': 55,
+                            'height': 55
+                        }
+                    },
+                    {
+                        selector: '.indirect-dependent',
+                        style: {
+                            'background-color': '#332f12',
+                            'width': 52,
+                            'height': 52
+                        }
+                    },
+                    {
+                        selector: '.selected',
+                        style: {
+                            'background-color': '#2b7372',
+                            'width': 60,
+                            'height': 60
+                        }
+                    },
+                    {
+                        selector: '.dimmed',
+                        style: {
+                            'opacity': 0.3
+                        }
+                    }
+                ],
                 layout: ${this.getGraphLayout()}
             });
 
@@ -766,80 +875,6 @@ export class DependencyAnalysis {
             ${this.getNodeClickHandler()}
             ${this.getMessageHandler()}
         </script>`;
-    }
-
-    private static getGraphStyles(): string {
-        return JSON.stringify([
-            {
-                selector: 'node',
-                style: {
-                    'background-color': '#474747',
-                    'label': 'data(label)',
-                    'color': '#ffffff',
-                    'text-valign': 'center',
-                    'text-halign': 'center',
-                    'width': 50,
-                    'height': 50,
-                    'font-size': 12
-                }
-            },
-            {
-                selector: 'edge',
-                style: {
-                    'width': 2,
-                    'line-color': '#505050',
-                    'target-arrow-color': '#505050',
-                    'target-arrow-shape': 'triangle',
-                    'curve-style': 'bezier'
-                }
-            },
-            {
-                selector: '.direct',
-                style: {
-                    'background-color': '#505f21',
-                    'width': 55,
-                    'height': 55
-                }
-            },
-            {
-                selector: '.indirect',
-                style: {
-                    'background-color': '#2d3312',
-                    'width': 52,
-                    'height': 52
-                }
-            },
-            {
-                selector: '.direct-dependent',
-                style: {
-                    'background-color': '#5f5721',
-                    'width': 55,
-                    'height': 55
-                }
-            },
-            {
-                selector: '.indirect-dependent',
-                style: {
-                    'background-color': '#332f12',
-                    'width': 52,
-                    'height': 52
-                }
-            },
-            {
-                selector: '.selected',
-                style: {
-                    'background-color': '#2b7372',
-                    'width': 60,
-                    'height': 60
-                }
-            },
-            {
-                selector: '.dimmed',
-                style: {
-                    'opacity': 0.3
-                }
-            }
-        ]);
     }
 
     private static getGraphLayout(): string {
