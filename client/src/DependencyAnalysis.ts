@@ -39,6 +39,7 @@ interface GraphNode {
         id: string;
         lineNumber: number;
         lineType: string;
+        assignmentVariable: string;
         content?: string;
     };
 }
@@ -465,14 +466,18 @@ export class DependencyAnalysis {
         }
 
         return {
-            nodes: Array.from(nodes).map(id => ({ 
-                data: { 
-                    id: id.toString(), 
-                    lineNumber: id,
-                    lineType: this.getLineType(lineContents.get(id) || ''),
-                    content: lineContents.get(id) || '' 
-                } 
-            })),
+            nodes: Array.from(nodes).map(id => {
+                const { lineType, assignmentVariable } = this.getLineType(lineContents.get(id) || '');
+                return { 
+                    data: { 
+                        id: id.toString(), 
+                        lineNumber: id,
+                        lineType: lineType,
+                        assignmentVariable: assignmentVariable,
+                        content: lineContents.get(id) || '' 
+                    } 
+                };
+            }),
             edges: edges.map((e, i) => ({ 
                 data: { 
                     id: `e${i}`, 
@@ -483,34 +488,40 @@ export class DependencyAnalysis {
         };
     }
 
-    private static getLineType(lineContent: string): string {
+    private static getLineType(lineContent: string): { lineType: string; assignmentVariable: string } {
         const trimmedLine = lineContent.trim();
         
         if (!trimmedLine) {
-            return 'other';
+            return { lineType: 'other', assignmentVariable: '' };
         }
         
         // Match the first word
         const match = trimmedLine.match(/^\S+/);
         let lineType = match ? match[0] : 'other';
-        
-        if (lineType === 'var') {
-            // Include the variable name (second word)
-            const secondWordMatch = trimmedLine.match(/^\S+\s+(\S+)/);
-            if (secondWordMatch) {
-                let secondWord = secondWordMatch[1];
-                if (secondWord.endsWith(':')) {
-                    secondWord = secondWord.slice(0, -1);
+        let assignmentVariable = "";
+
+        if (lineContent.includes(":=")) {
+            assignmentVariable = lineType;
+            
+            if (lineType === 'var') {
+                // Include the variable name (second word)
+                const secondWordMatch = trimmedLine.match(/^\S+\s+(\S+)/);
+                if (secondWordMatch) {
+                    let secondWord = secondWordMatch[1];
+                    if (secondWord.endsWith(':')) {
+                        secondWord = secondWord.slice(0, -1);
+                    }
+                    assignmentVariable = secondWord;
                 }
-                lineType = lineType + ' ' + secondWord;
             }
+            if (assignmentVariable.length > 11) {
+                assignmentVariable = assignmentVariable.slice(0, 10) + "…";
+            }
+
+            lineType = "assignment";
         }
         
-        if (lineType.length > 12 && lineContent.includes(':=')) {
-            lineType = ':=';
-        }
-        
-        return lineType;
+        return { lineType, assignmentVariable };
     }
 
     private static highlightLines(lineNumber: number, neighbors: number[], indirectNeighbors: number[] = [], showDependents: boolean = false): void {
@@ -718,10 +729,22 @@ export class DependencyAnalysis {
                             'background-image': function(element) {
                                 const lineNum = element.data('lineNumber');
                                 const lineType = element.data('lineType');
-                                const svg = '<svg width="80" height="80" xmlns="http://www.w3.org/2000/svg">' +
-                                          '<text x="40" y="35" text-anchor="middle" font-size="16" fill="white" font-family="Arial">' + lineNum + '</text>' +
-                                          '<text x="40" y="52" text-anchor="middle" font-size="10" fill="white" font-family="Arial">' + lineType + '</text>' +
+                                const assignmentVariable = element.data('assignmentVariable');
+                                
+                                let svg;
+                                if (assignmentVariable === '') {
+                                    svg = '<svg width="80" height="80" xmlns="http://www.w3.org/2000/svg">' +
+                                          '<text x="40" y="35" text-anchor="middle" font-size="16" fill="white" font-family="Arial, sans-serif">' + lineNum + '</text>' +
+                                          '<text x="40" y="52" text-anchor="middle" font-size="12" fill="white" font-family="Arial, sans-serif">' + lineType + '</text>' +
                                           '</svg>';
+                                } else {
+                                    svg = '<svg width="80" height="80" xmlns="http://www.w3.org/2000/svg">' +
+                                          '<text x="40" y="26" text-anchor="middle" font-size="16" fill="white" font-family="Arial, sans-serif">' + lineNum + '</text>' +
+                                          '<text x="40" y="43" text-anchor="middle" font-size="12" fill="white" font-family="Arial, sans-serif">' + lineType + '</text>' +
+                                          '<text x="40" y="58" text-anchor="middle" font-size="10" fill="white" font-style="italic" font-family="Consolas, Monaco, Courier New, monospace">' + assignmentVariable + '</text>' +
+                                          '</svg>';
+                                }
+                                
                                 return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
                             },
                             'background-fit': 'contain',
