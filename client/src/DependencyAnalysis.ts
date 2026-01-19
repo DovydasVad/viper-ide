@@ -637,6 +637,11 @@ export class DependencyAnalysis {
             ${styles}
         </head>
         <body>
+            <div id="zoom-controls">
+                <button id="zoomIn" title="Zoom in">+</button>
+                <button id="zoomOut" title="Zoom out">−</button>
+                <button id="zoomReset" title="Reset zoom">⊙</button>
+            </div>
             <div id="controls">
                 <button id="toggleIndirect" title="Toggle indirect dependencies">Show Indirect</button>
                 <button id="toggleDirection" title="Switch between dependencies and dependents">Show Dependents</button>
@@ -659,6 +664,33 @@ export class DependencyAnalysis {
                 width: 100%;
                 height: 100vh;
                 background-color: #1e1e1e;
+            }
+            #zoom-controls {
+                position: absolute;
+                top: 10px;
+                left: 10px;
+                z-index: 1000;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+            #zoom-controls button {
+                background-color: #2d2d30;
+                color: #cccccc;
+                border: 1px solid #454545;
+                border-radius: 4px;
+                padding: 8px;
+                width: 36px;
+                height: 36px;
+                font-size: 18px;
+                cursor: pointer;
+                transition: background-color 0.2s;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            #zoom-controls button:hover {
+                background-color: #3e3e42;
             }
             #controls {
                 position: absolute;
@@ -899,6 +931,7 @@ export class DependencyAnalysis {
                 }
             }
 
+            ${this.getZoomButtonHandlers()}
             ${this.getDirectionToggleHandler()}
             ${this.getToggleButtonHandler()}
             ${this.getTooltipHandlers()}
@@ -914,6 +947,37 @@ export class DependencyAnalysis {
             idealEdgeLength: 100,
             nodeOverlap: 20
         });
+    }
+
+    private static getZoomButtonHandlers(): string {
+        return /* javascript */`
+            const zoomInBtn = document.getElementById('zoomIn');
+            const zoomOutBtn = document.getElementById('zoomOut');
+            const zoomResetBtn = document.getElementById('zoomReset');
+            
+            zoomInBtn.addEventListener('click', function() {
+                const extent = cy.extent();
+                const centerX = (extent.x1 + extent.x2) / 2;
+                const centerY = (extent.y1 + extent.y2) / 2;
+                cy.zoom({
+                    level: cy.zoom() * (1.0 / 0.7),
+                    position: { x: centerX, y: centerY }
+                });
+            });
+            
+            zoomOutBtn.addEventListener('click', function() {
+                const extent = cy.extent();
+                const centerX = (extent.x1 + extent.x2) / 2;
+                const centerY = (extent.y1 + extent.y2) / 2;
+                cy.zoom({
+                    level: cy.zoom() * 0.7,
+                    position: { x: centerX, y: centerY }
+                });
+            });
+            
+            zoomResetBtn.addEventListener('click', function() {
+                cy.fit();
+            });`;
     }
 
     private static getDirectionToggleHandler(): string {
