@@ -550,11 +550,16 @@ export class DependencyAnalysis {
 
             // Check if line numbers are valid
             const lineCount = editor.document.lineCount;
-            if (lineNumber < 1 || lineNumber > lineCount) {
+            if (lineNumber < 0 || lineNumber > lineCount) {
                 Log.log(`Invalid line number: ${lineNumber} (document has ${lineCount} lines)`, LogLevel.Debug);
                 vscode.window.showWarningMessage(`Line ${lineNumber} is out of range`);
                 return;
             }
+            
+            this.clearEditorDecorations(editor);
+
+            if (lineNumber == 0)
+                return;
 
             const selectedLine = [{ range: editor.document.lineAt(lineNumber - 1).range }];
             const directLines = neighbors
@@ -571,9 +576,6 @@ export class DependencyAnalysis {
             // Choose decorations based on direction mode
             const directDecoration = showDependents ? directDependantDecoration : directDependencyDecoration;
             const indirectDecoration = showDependents ? indirectDependantDecoration : indirectDependencyDecoration;
-
-            // Clear all decorations first to avoid leftover highlights from previous mode
-            this.clearEditorDecorations(editor);
 
             // Apply new decorations
             editor.setDecorations(directDecoration, directLines);
@@ -985,11 +987,26 @@ export class DependencyAnalysis {
         return /* javascript */`cy.on('tap', 'node', function(evt) {
                 const node = evt.target;
                 
-                // Track the selected node for toggle button recalculation
-                selectedNode = node;
-                
-                // Highlight the node and its dependencies
-                highlightNodeAndDependencies(node, true);
+                // If clicking the already selected node, clear all highlights
+                if (selectedNode && selectedNode.id() === node.id()) {
+                    selectedNode = null;
+                    cy.elements().removeClass('selected direct indirect direct-dependent indirect-dependent dimmed');
+                    
+                    // Send message to code view to clear code highlights
+                    vscode.postMessage({
+                        command: 'highlightLines',
+                        lineNumber: 0,
+                        neighbors: [],
+                        indirectNeighbors: [],
+                        showDependents: showDependents
+                    });
+                } else {
+                    // Track the selected node for toggle button recalculation
+                    selectedNode = node;
+                    
+                    // Highlight the node and its dependencies
+                    highlightNodeAndDependencies(node, true);
+                }
             });`;
     }
 
