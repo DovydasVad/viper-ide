@@ -918,6 +918,10 @@ export class DependencyAnalysis {
         return /* javascript */`<script>                                // Tip: install VSC extension 'es6-string-html' to see syntax highlighting for these multi-line strings
             const vscode = acquireVsCodeApi();
             
+            // Allow zooming out to 40% and zooming in to 500% of initial zoom level
+            const ZOOM_OUT_FACTOR = 0.4;
+            const ZOOM_IN_FACTOR = 5.0;
+            
             const cy = cytoscape({
                 container: document.getElementById('cy'),
                 elements: ${graphDataJson},
@@ -1017,7 +1021,10 @@ export class DependencyAnalysis {
                         }
                     }
                 ],
-                layout: ${this.getGraphLayout()}
+                layout: ${this.getGraphLayout()},
+                wheelSensitivity: 0.2,
+                minZoom: ZOOM_OUT_FACTOR,
+                maxZoom: ZOOM_IN_FACTOR
             });
 
             // Track whether indirect dependencies are shown
@@ -1028,6 +1035,13 @@ export class DependencyAnalysis {
             
             // Track the currently selected node for toggle button recalculation
             let selectedNode = null;
+            
+            // Update zoom limits after layout settles
+            cy.one('layoutstop', function() {
+                const initialZoom = cy.zoom();
+                cy.minZoom(initialZoom * ZOOM_OUT_FACTOR);
+                cy.maxZoom(initialZoom * ZOOM_IN_FACTOR);
+            });
 
 
             // Shared function to highlight a node and its dependencies/dependents
@@ -1141,8 +1155,9 @@ export class DependencyAnalysis {
                 const extent = cy.extent();
                 const centerX = (extent.x1 + extent.x2) / 2;
                 const centerY = (extent.y1 + extent.y2) / 2;
+                const newZoom = Math.min(cy.zoom() * (1.0 / 0.7), cy.maxZoom());
                 cy.zoom({
-                    level: cy.zoom() * (1.0 / 0.7),
+                    level: newZoom,
                     position: { x: centerX, y: centerY }
                 });
             });
@@ -1151,8 +1166,9 @@ export class DependencyAnalysis {
                 const extent = cy.extent();
                 const centerX = (extent.x1 + extent.x2) / 2;
                 const centerY = (extent.y1 + extent.y2) / 2;
+                const newZoom = Math.max(cy.zoom() * 0.7, cy.minZoom());
                 cy.zoom({
-                    level: cy.zoom() * 0.7,
+                    level: newZoom,
                     position: { x: centerX, y: centerY }
                 });
             });
@@ -1360,7 +1376,7 @@ export class DependencyAnalysis {
                 // If clicking the already selected node, clear all highlights
                 if (selectedNode && selectedNode.id() === node.id()) {
                     selectedNode = null;
-                    cy.elements().removeClass('selected direct indirect direct-dependent indirect-dependent dimmed');
+                    cy.elements().removeClass('selected direct indirect direct-dependent indirect-dependent dimmed filtered');
                     
                     // Send message to code view to clear code highlights
                     vscode.postMessage({
