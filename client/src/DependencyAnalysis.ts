@@ -42,6 +42,7 @@ interface GraphNode {
         assignmentVariable: string;
         nodeCategories: string[];
         content?: string;
+        externalDependencyCount?: number;
     };
 }
 
@@ -255,7 +256,7 @@ export class DependencyAnalysis {
             }
 
             // Load graph data from translated edges CSV
-            const graphData = this.loadGraphFromCSV(translatedEdgesPath);
+            const graphData = this.loadGraphFromCSV(translatedEdgesPath, fileUri);
             this.currentPanel.webview.html = this.getWebviewContent(graphData);
 
             // Handle messages from webview
@@ -419,12 +420,13 @@ export class DependencyAnalysis {
         }
     }
 
-    private static loadGraphFromCSV(csvPath: string): GraphData {
+    private static loadGraphFromCSV(csvPath: string, analyzedFileUri: vscode.Uri): GraphData {
         if (!fs.existsSync(csvPath)) {
             return { nodes: [], edges: [] };
         }
 
         const exportDir = path.dirname(csvPath);
+        const analyzedFileName = path.basename(analyzedFileUri.fsPath);
 
         const linesPath = path.join(exportDir, 'lines.csv');
         const lineContents = new Map<number, string>();
@@ -446,6 +448,8 @@ export class DependencyAnalysis {
         // Load node categories from nodes.csv
         const nodesPath = path.join(exportDir, 'nodes.csv');
         const nodeCategories = new Map<number, string[]>();
+        const nodeIdToLine = new Map<string, number>();
+        const nodeIdToFile = new Map<string, string>();
         
         if (fs.existsSync(nodesPath)) {
             const nodesContent = fs.readFileSync(nodesPath, 'utf-8');
@@ -462,51 +466,79 @@ export class DependencyAnalysis {
                 const assumptionType = parts[2].trim();
                 const position = parts[5].trim();
                 
-                // Extract line number from position (e.g., "file.vpr @ line 4")
-                const lineMatch = position.match(/line (\d+)/);
-                if (lineMatch) {
-                    const lineNumber = parseInt(lineMatch[1], 10);
-                    const categories = this.getNodeCategories(nodeType, assumptionType);
+                // Extract file name and line number from position (e.g., "file.vpr @ line 4")
+                const posMatch = position.match(/^(.+?)\s+@\s+line\s+(\d+)/);
+                if (posMatch) {
+                    const fileName = posMatch[1].trim();
+                    const lineNumber = parseInt(posMatch[2], 10);
                     
-                    // Merge categories if line already exists
-                    if (nodeCategories.has(lineNumber)) {
-                        const existing = nodeCategories.get(lineNumber)!;
-                        const merged = Array.from(new Set([...existing, ...categories]));
-                        nodeCategories.set(lineNumber, merged);
-                    } else {
-                        nodeCategories.set(lineNumber, categories);
+                    nodeIdToFile.set(nodeId, fileName);
+                    
+                    if (fileName === analyzedFileName) {
+                        nodeIdToLine.set(nodeId, lineNumber);
+                        
+                        const categories = this.getNodeCategories(nodeType, assumptionType);
+                        
+                        // Merge categories if line already exists
+                        if (nodeCategories.has(lineNumber)) {
+                            const existing = nodeCategories.get(lineNumber)!;
+                            const merged = Array.from(new Set([...existing, ...categories]));
+                            nodeCategories.set(lineNumber, merged);
+                        } else {
+                            nodeCategories.set(lineNumber, categories);
+                        }
                     }
                 }
             }
         }
-
-        // Load edges from edges_translated.csv
-        const csvContent = fs.readFileSync(csvPath, 'utf-8');
-        const lines = csvContent.trim().split('\n');
         
+        const edgesPath = path.join(exportDir, 'edges.csv');
+        const externalDependencyCounts = new Map<number, number>();  // lineNumber -> count
         const nodes = new Set<number>();
         const edges: Array<{source: number, target: number}> = [];
-
-        // Skip header if present
-        const startIndex = lines[0].includes('source') ? 1 : 0;
-
-        for (let i = startIndex; i < lines.length; i++) {
-            const parts = lines[i].split(',');
-            if (parts.length < 2) continue;
+        
+        if (fs.existsSync(edgesPath)) {
+            const edgesContent = fs.readFileSync(edgesPath, 'utf-8');
+            const edgesLines = edgesContent.trim().split('\n').slice(1); // Skip header
+            const seenEdgeKeys = new Set<string>();
             
-            const source = parseInt(parts[0].trim());
-            const target = parseInt(parts[1].trim());
-            
-            if (!isNaN(source) && !isNaN(target)) {
-                nodes.add(source);
-                nodes.add(target);
-                edges.push({ source, target });
+            for (const line of edgesLines) {
+                if (!line.trim()) continue;
+                
+                const parts = line.split(',');
+                if (parts.length < 2) continue;
+                
+                const sourceId = parts[0].trim();
+                const targetId = parts[1].trim();
+                
+                const sourceLine = nodeIdToLine.get(sourceId);
+                const targetLine = nodeIdToLine.get(targetId);
+                const sourceFile = nodeIdToFile.get(sourceId);
+                
+                // Count external dependencies: target in our file, source from different file
+                if (targetLine !== undefined && sourceFile && sourceFile !== analyzedFileName) {
+                    const currentCount = externalDependencyCounts.get(targetLine) || 0;
+                    externalDependencyCounts.set(targetLine, currentCount + 1);
+                }
+                
+                // Build graph edges: both endpoints in analyzed file
+                if (sourceLine !== undefined && targetLine !== undefined && sourceLine !== targetLine) {
+                    const edgeKey = `${sourceLine},${targetLine}`;
+                    if (!seenEdgeKeys.has(edgeKey)) {
+                        seenEdgeKeys.add(edgeKey);
+                        nodes.add(sourceLine);
+                        nodes.add(targetLine);
+                        edges.push({ source: sourceLine, target: targetLine });
+                    }
+                }
             }
         }
 
         return {
             nodes: Array.from(nodes).map(id => {
                 const { lineType, assignmentVariable } = this.getLineType(lineContents.get(id) || '');
+                const externalDepCount = externalDependencyCounts.get(id) || 0;
+                
                 return { 
                     data: { 
                         id: id.toString(), 
@@ -514,7 +546,8 @@ export class DependencyAnalysis {
                         lineType: lineType,
                         assignmentVariable: assignmentVariable,
                         nodeCategories: nodeCategories.get(id) || ['Unknown'],
-                        content: lineContents.get(id) || '' 
+                        content: lineContents.get(id) || '',
+                        externalDependencyCount: externalDepCount
                     } 
                 };
             }),
@@ -935,19 +968,40 @@ export class DependencyAnalysis {
                                 const lineType = element.data('lineType');
                                 const assignmentVariable = element.data('assignmentVariable');
                                 
-                                let svg;
+                                let svg = '<svg width="80" height="80" xmlns="http://www.w3.org/2000/svg">';
+                                
+                                // Main node content
                                 if (assignmentVariable === '') {
-                                    svg = '<svg width="80" height="80" xmlns="http://www.w3.org/2000/svg">' +
-                                          '<text x="40" y="35" text-anchor="middle" font-size="16" fill="white" font-family="Arial, sans-serif">' + lineNum + '</text>' +
-                                          '<text x="40" y="52" text-anchor="middle" font-size="12" fill="white" font-family="Arial, sans-serif">' + lineType + '</text>' +
-                                          '</svg>';
+                                    svg += '<text x="40" y="35" text-anchor="middle" font-size="16" fill="white" font-family="Arial, sans-serif">' + lineNum + '</text>';
+                                    svg += '<text x="40" y="52" text-anchor="middle" font-size="12" fill="white" font-family="Arial, sans-serif">' + lineType + '</text>';
                                 } else {
-                                    svg = '<svg width="80" height="80" xmlns="http://www.w3.org/2000/svg">' +
-                                          '<text x="40" y="26" text-anchor="middle" font-size="16" fill="white" font-family="Arial, sans-serif">' + lineNum + '</text>' +
-                                          '<text x="40" y="43" text-anchor="middle" font-size="12" fill="white" font-family="Arial, sans-serif">' + lineType + '</text>' +
-                                          '<text x="40" y="58" text-anchor="middle" font-size="10" fill="white" font-style="italic" font-family="Consolas, Monaco, Courier New, monospace">' + assignmentVariable + '</text>' +
-                                          '</svg>';
+                                    svg += '<text x="40" y="30" text-anchor="middle" font-size="16" fill="white" font-family="Arial, sans-serif">' + lineNum + '</text>';
+                                    svg += '<text x="40" y="46" text-anchor="middle" font-size="12" fill="white" font-family="Arial, sans-serif">' + lineType + '</text>';
+                                    svg += '<text x="40" y="60" text-anchor="middle" font-size="10" fill="white" font-style="italic" font-family="Consolas, Monaco, Courier New, monospace">' + assignmentVariable + '</text>';
                                 }
+                                
+                                // External dependency badge (only show if count > 0)
+                                const externalDepCount = element.data('externalDependencyCount') || 0;
+                                
+                                if (externalDepCount > 0) {
+                                    // Dynamic badge sizing based on digit count
+                                    const digitCount = externalDepCount.toString().length;
+                                    const badgeWidth = 9 + 2 * digitCount;
+                                    const badgeCenterX = 1.5 + badgeWidth;
+                                    
+                                    svg += '<ellipse cx="' + badgeCenterX + '" cy="11" rx="' + badgeWidth + '" ry="8" fill="#5b89c4" opacity="0.95"/>';
+                                    
+                                    // White chain link icon, taken from https://www.svgrepo.com/svg/116705/link-interface-symbol-rotated-to-right
+                                    svg += '<g transform="translate(4, 4.5) scale(0.025)">';
+                                    svg += '<path d="M409.657,32.474c-43.146-43.146-113.832-43.146-156.978,0l-84.763,84.762c29.07-8.262,60.589-6.12,88.129,6.732l44.063-44.064c17.136-17.136,44.982-17.136,62.118,0c17.136,17.136,17.136,44.982,0,62.118l-55.386,55.386l-36.414,36.414c-17.136,17.136-44.982,17.136-62.119,0l-47.43,47.43c11.016,11.017,23.868,19.278,37.332,24.48c36.415,14.382,78.643,8.874,110.467-16.219c3.06-2.447,6.426-5.201,9.18-8.262l57.222-57.222l34.578-34.578C453.109,146.306,453.109,75.926,409.657,32.474z" fill="white"/>';
+                                    svg += '<path d="M184.135,320.114l-42.228,42.228c-17.136,17.137-44.982,17.137-62.118,0c-17.136-17.136-17.136-44.981,0-62.118l91.8-91.799c17.136-17.136,44.982-17.136,62.119,0l47.43-47.43c-11.016-11.016-23.868-19.278-37.332-24.48c-38.25-15.3-83.232-8.262-115.362,20.502c-1.53,1.224-3.06,2.754-4.284,3.978l-91.8,91.799c-43.146,43.146-43.146,113.832,0,156.979c43.146,43.146,113.832,43.146,156.978,0l82.927-83.845C230.035,335.719,220.243,334.496,184.135,320.114z" fill="white"/>';
+                                    svg += '</g>';
+                                    
+                                    // External Dependency count on the right side of oval
+                                    svg += '<text x="' + (badgeCenterX + 6) + '" y="13" text-anchor="middle" font-size="8" fill="white" font-weight="bold" font-family="Arial, sans-serif">' + externalDepCount + '</text>';
+                                }
+                                
+                                svg += '</svg>';
                                 
                                 return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
                             },
