@@ -40,6 +40,7 @@ interface GraphNode {
         lineNumber: number;
         lineType: string;
         assignmentVariable: string;
+        nodeCategories: string[];
         content?: string;
     };
 }
@@ -442,6 +443,44 @@ export class DependencyAnalysis {
             }
         }
 
+        // Load node categories from nodes.csv
+        const nodesPath = path.join(exportDir, 'nodes.csv');
+        const nodeCategories = new Map<number, string[]>();
+        
+        if (fs.existsSync(nodesPath)) {
+            const nodesContent = fs.readFileSync(nodesPath, 'utf-8');
+            const nodesLines = nodesContent.trim().split('\n').slice(1); // Skip header
+            
+            for (const line of nodesLines) {
+                if (!line.trim()) continue;
+                
+                const parts = line.split('#');
+                if (parts.length < 6) continue;
+                
+                const nodeId = parts[0].trim();
+                const nodeType = parts[1].trim();
+                const assumptionType = parts[2].trim();
+                const position = parts[5].trim();
+                
+                // Extract line number from position (e.g., "file.vpr @ line 4")
+                const lineMatch = position.match(/line (\d+)/);
+                if (lineMatch) {
+                    const lineNumber = parseInt(lineMatch[1], 10);
+                    const categories = this.getNodeCategories(nodeType, assumptionType);
+                    
+                    // Merge categories if line already exists
+                    if (nodeCategories.has(lineNumber)) {
+                        const existing = nodeCategories.get(lineNumber)!;
+                        const merged = Array.from(new Set([...existing, ...categories]));
+                        nodeCategories.set(lineNumber, merged);
+                    } else {
+                        nodeCategories.set(lineNumber, categories);
+                    }
+                }
+            }
+        }
+
+        // Load edges from edges_translated.csv
         const csvContent = fs.readFileSync(csvPath, 'utf-8');
         const lines = csvContent.trim().split('\n');
         
@@ -474,6 +513,7 @@ export class DependencyAnalysis {
                         lineNumber: id,
                         lineType: lineType,
                         assignmentVariable: assignmentVariable,
+                        nodeCategories: nodeCategories.get(id) || ['Unknown'],
                         content: lineContents.get(id) || '' 
                     } 
                 };
@@ -486,6 +526,34 @@ export class DependencyAnalysis {
                 } 
             }))
         };
+    }
+
+    private static getNodeCategories(nodeType: string, assumptionType: string): string[] {
+        const categories: string[] = [];
+        
+        if (nodeType === 'Assumption') {
+            if (assumptionType === 'Explicit') {
+                categories.push('ExplicitAssumption');
+            } else if (assumptionType === 'Internal') {
+                categories.push('InternalAssumption');
+            } else {
+                categories.push('ImplicitAssumption');  // PathCondition, LoopInvariant, Implicit, and all other fine-grained assumption types
+            }
+        }
+        
+        if (nodeType === 'Assertion') {
+            if (assumptionType === 'Explicit' || assumptionType === 'ImplicitPostcondition' || assumptionType === 'ExplicitPostcondition') {
+                categories.push('ExplicitAssertion');
+            } else {
+                categories.push('ImplicitAssertion');
+            }
+        }
+
+        if (nodeType === 'Infeasible') {
+            categories.push('Infeasible');
+        }
+        
+        return categories.length > 0 ? categories : ['Unknown'];
     }
 
     private static getLineType(lineContent: string): { lineType: string; assignmentVariable: string } {
@@ -519,6 +587,10 @@ export class DependencyAnalysis {
             }
 
             lineType = "assignment";
+        }
+
+        if (lineType.length > 10) {
+            lineType = lineType.slice(0, 9) + "…";
         }
         
         return { lineType, assignmentVariable };
@@ -640,11 +712,38 @@ export class DependencyAnalysis {
             <div id="zoom-controls">
                 <button id="zoomIn" title="Zoom in">+</button>
                 <button id="zoomOut" title="Zoom out">−</button>
-                <button id="zoomReset" title="Reset zoom">⊙</button>
+                <button id="zoomReset" title="Reset zoom (Fit graph to the canvas)">⊙</button>
             </div>
             <div id="controls">
                 <button id="toggleIndirect" title="Toggle indirect dependencies">Show Indirect</button>
                 <button id="toggleDirection" title="Switch between dependencies and dependents">Show Dependents</button>
+                <button id="filterDropdown" title="Filter node types">⚙ Node Filters ▼</button>
+            </div>
+            <div id="filterPanel" class="hidden">
+                <label>
+                    <input type="checkbox" id="filter-ExplicitAssumption" checked>
+                    Explicit Assumptions <span class="count">(0)</span>
+                </label>
+                <label>
+                    <input type="checkbox" id="filter-ImplicitAssumption" checked>
+                    Implicit Assumptions <span class="count">(0)</span>
+                </label>
+                <label>
+                    <input type="checkbox" id="filter-InternalAssumption" checked>
+                    Internal Assumptions <span class="count">(0)</span>
+                </label>
+                <label>
+                    <input type="checkbox" id="filter-ExplicitAssertion" checked>
+                    Explicit Assertions <span class="count">(0)</span>
+                </label>
+                <label>
+                    <input type="checkbox" id="filter-ImplicitAssertion" checked>
+                    Implicit Assertions <span class="count">(0)</span>
+                </label>
+                <div class="filter-actions">
+                    <button id="deselectAll">Deselect All</button>
+                    <button id="selectAll">Select All</button>
+                </div>
             </div>
             <div id="cy"></div>
             <div id="tooltip"></div>
@@ -742,6 +841,73 @@ export class DependencyAnalysis {
             }
             #tooltip .line-content {
                 color: #d4d4d4;
+            }
+            #filterPanel {
+                position: absolute;
+                top: 50px;
+                right: 10px;
+                background-color: #2d2d30;
+                border: 1px solid #454545;
+                border-radius: 4px;
+                padding: 12px;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                width: 225px;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+                z-index: 1001;
+                transition: opacity 0.2s, visibility 0.2s;
+            }
+            #filterPanel.hidden {
+                display: none;
+            }
+            #filterPanel label {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                color: #cccccc;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-size: 12px;
+                cursor: pointer;
+                padding: 4px;
+                border-radius: 3px;
+                transition: background-color 0.15s;
+            }
+            #filterPanel label:hover {
+                background-color: #3e3e42;
+            }
+            #filterPanel input[type="checkbox"] {
+                cursor: pointer;
+                width: 16px;
+                height: 16px;
+                margin: 0;
+            }
+            #filterPanel .count {
+                margin-left: auto;
+                color: #858585;
+                font-size: 11px;
+            }
+            #filterPanel .filter-actions {
+                display: flex;
+                gap: 6px;
+                margin-top: 4px;
+                padding-top: 8px;
+                border-top: 1px solid #454545;
+            }
+            #filterPanel .filter-actions button {
+                flex: 1;
+                background-color: #3e3e42;
+                color: #cccccc;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 6px 8px;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-size: 11px;
+                cursor: pointer;
+                transition: background-color 0.15s;
+            }
+            #filterPanel .filter-actions button:hover {
+                background-color: #4e4e52;
             }
         </style>`;
     }
@@ -842,6 +1008,13 @@ export class DependencyAnalysis {
                         style: {
                             'opacity': 0.3
                         }
+                    },
+                    {
+                        selector: '.filtered',
+                        style: {
+                            'background-color': '#4e4e4e',
+                            'opacity': 0.8
+                        }
                     }
                 ],
                 layout: ${this.getGraphLayout()}
@@ -855,7 +1028,8 @@ export class DependencyAnalysis {
             
             // Track the currently selected node for toggle button recalculation
             let selectedNode = null;
-            
+
+
             // Shared function to highlight a node and its dependencies/dependents
             function highlightNodeAndDependencies(node, sendMessage = true) {
                 if (!node || node.length === 0) return;
@@ -863,7 +1037,7 @@ export class DependencyAnalysis {
                 const lineNumber = parseInt(node.id());
                 
                 // Clear previous highlights and dimming
-                cy.elements().removeClass('selected direct indirect direct-dependent indirect-dependent dimmed');
+                cy.elements().removeClass('selected direct indirect direct-dependent indirect-dependent dimmed filtered');
                 
                 // Get related nodes based on direction and mode
                 let related, directRelated;
@@ -911,13 +1085,19 @@ export class DependencyAnalysis {
 
                 node.addClass('selected');
                 
+                // Apply filters AFTER highlight classes are set
+                applyFilters();
+                
                 // Send message to extension for code highlighting
                 if (sendMessage) {
+                    // Only include nodes that are not filtered
                     const directNeighbors = directRelated.nodes()
+                        .filter(n => !n.hasClass('filtered'))
                         .map(n => parseInt(n.id()));
                     const indirectNeighbors = showIndirect 
                         ? related.nodes()
                             .difference(directRelated.nodes())
+                            .filter(n => !n.hasClass('filtered'))
                             .map(n => parseInt(n.id()))
                         : [];
                     
@@ -932,6 +1112,8 @@ export class DependencyAnalysis {
             }
 
             ${this.getZoomButtonHandlers()}
+            ${this.getFilterDropdownHandler()}
+            ${this.getFilterLogicHandler()}
             ${this.getDirectionToggleHandler()}
             ${this.getToggleButtonHandler()}
             ${this.getTooltipHandlers()}
@@ -977,6 +1159,130 @@ export class DependencyAnalysis {
             
             zoomResetBtn.addEventListener('click', function() {
                 cy.fit();
+            });`;
+    }
+
+    private static getFilterDropdownHandler(): string {
+        return /* javascript */`
+            const filterDropdownBtn = document.getElementById('filterDropdown');
+            const filterPanel = document.getElementById('filterPanel');
+            
+            // Toggle filter panel visibility
+            filterDropdownBtn.addEventListener('click', function() {
+                filterPanel.classList.toggle('hidden');
+                this.classList.toggle('active', !filterPanel.classList.contains('hidden'));
+            });
+            
+            // Close panel when clicking outside
+            document.addEventListener('click', function(event) {
+                const isClickInside = filterDropdownBtn.contains(event.target) || filterPanel.contains(event.target);
+                if (!isClickInside && !filterPanel.classList.contains('hidden')) {
+                    filterPanel.classList.add('hidden');
+                    filterDropdownBtn.classList.remove('active');
+                }
+            });`;
+    }
+
+    private static getFilterLogicHandler(): string {
+        return /* javascript */`
+            // Track enabled filter categories
+            const filterState = {
+                'ExplicitAssumption': true,
+                'ImplicitAssumption': true,
+                'InternalAssumption': true,
+                'ExplicitAssertion': true,
+                'ImplicitAssertion': true
+            };
+            
+            // Calculate node counts for each category
+            const categoryCounts = {
+                'ExplicitAssumption': 0,
+                'ImplicitAssumption': 0,
+                'InternalAssumption': 0,
+                'ExplicitAssertion': 0,
+                'ImplicitAssertion': 0
+            };
+            
+            cy.nodes().forEach(function(node) {
+                const categories = node.data('nodeCategories') || [];
+                categories.forEach(function(category) {
+                    if (categoryCounts[category] !== undefined) {
+                        categoryCounts[category]++;
+                    }
+                });
+            });
+            
+            // Update count displays
+            document.querySelector('#filter-ExplicitAssumption + .count').textContent = '(' + categoryCounts.ExplicitAssumption + ')';
+            document.querySelector('#filter-ImplicitAssumption + .count').textContent = '(' + categoryCounts.ImplicitAssumption + ')';
+            document.querySelector('#filter-InternalAssumption + .count').textContent = '(' + categoryCounts.InternalAssumption + ')';
+            document.querySelector('#filter-ExplicitAssertion + .count').textContent = '(' + categoryCounts.ExplicitAssertion + ')';
+            document.querySelector('#filter-ImplicitAssertion + .count').textContent = '(' + categoryCounts.ImplicitAssertion + ')';
+            
+            // Function to apply filters to nodes
+            function applyFilters() {
+                cy.nodes().forEach(function(node) {
+                    const categories = node.data('nodeCategories') || [];
+                    
+                    // Only apply filtering to direct/indirect dependency nodes
+                    const isHighlightedDependency = node.hasClass('direct') || 
+                                                     node.hasClass('indirect') ||
+                                                     node.hasClass('direct-dependent') ||
+                                                     node.hasClass('indirect-dependent');
+                    
+                    if (!isHighlightedDependency || node.hasClass('selected')) {
+                        // Skip nodes that are not highlighted dependencies
+                        return;
+                    }
+                    
+                    // Node is visible if ANY of its categories are enabled
+                    const isVisible = categories.some(function(category) {
+                        return filterState[category] === true;
+                    });
+                    
+                    if (isVisible) {
+                        node.removeClass('filtered');
+                    } else {
+                        node.addClass('filtered');
+                    }
+                });
+            }
+            
+            // Add event listeners to checkboxes
+            const checkboxes = ['ExplicitAssumption', 'ImplicitAssumption', 'InternalAssumption', 'ExplicitAssertion', 'ImplicitAssertion'];
+            checkboxes.forEach(function(category) {
+                const checkbox = document.getElementById('filter-' + category);
+                checkbox.addEventListener('change', function() {
+                    filterState[category] = this.checked;
+                    applyFilters();
+                    // Re-highlight current node to update code view with filtered nodes
+                    if (selectedNode && selectedNode.length > 0) {
+                        highlightNodeAndDependencies(selectedNode, true);
+                    }
+                });
+            });
+            
+            // Helper function to set all checkboxes
+            function setAllCheckboxes(checked) {
+                checkboxes.forEach(function(category) {
+                    filterState[category] = checked;
+                    document.getElementById('filter-' + category).checked = checked;
+                });
+                applyFilters();
+                // Re-highlight current node to update code view with filtered nodes
+                if (selectedNode && selectedNode.length > 0) {
+                    highlightNodeAndDependencies(selectedNode, true);
+                }
+            }
+            
+            // Select All button
+            document.getElementById('selectAll').addEventListener('click', function() {
+                setAllCheckboxes(true);
+            });
+            
+            // Deselect All button
+            document.getElementById('deselectAll').addEventListener('click', function() {
+                setAllCheckboxes(false);
             });`;
     }
 
