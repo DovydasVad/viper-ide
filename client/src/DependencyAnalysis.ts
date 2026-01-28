@@ -383,6 +383,9 @@ export class DependencyAnalysis {
         });
 
         context.subscriptions.push(showGraphCommand, toggleCommand);
+        
+        // Register prune actions
+        registerPruneActions(context);
     }
 
     public static toggleDependencyAnalysis(): void {
@@ -1757,3 +1760,233 @@ export class DependencyAnalysis {
             });`;
     }
 }
+
+
+/*
+###########################################################################
+###########################       Pruning       ###########################
+###########################################################################
+*/
+
+class PruneCodeActionProvider implements vscode.CodeActionProvider {
+    public static readonly providedCodeActionKinds = [
+        vscode.CodeActionKind.RefactorRewrite
+    ];
+
+    public provideCodeActions(
+        document: vscode.TextDocument,
+        range: vscode.Range | vscode.Selection,
+        context: vscode.CodeActionContext,
+        token: vscode.CancellationToken
+    ): vscode.CodeAction[] | undefined {
+        if (!State.dependencyAnalysis) {
+            return undefined;
+        }
+
+        const line = document.lineAt(range.start.line);
+        const lineText = line.text.trim();
+
+        // Check if line starts with "method" or "function"
+        if (!lineText.startsWith('method ') && !lineText.startsWith('function ')) {
+            return undefined;
+        }
+
+        // Create the two prune actions
+        const pruneBelowAction = this.createPruneAction(
+            document,
+            range,
+            'Prune (Put Below)',
+            'pruneBelow'
+        );
+
+        const pruneReplaceAction = this.createPruneAction(
+            document,
+            range,
+            'Prune (Replace)',
+            'pruneReplace'
+        );
+
+        return [pruneBelowAction, pruneReplaceAction];
+    }
+
+    private createPruneAction(
+        document: vscode.TextDocument,
+        range: vscode.Range,
+        title: string,
+        mode: 'pruneBelow' | 'pruneReplace'
+    ): vscode.CodeAction {
+        const action = new vscode.CodeAction(title, vscode.CodeActionKind.RefactorRewrite);
+        action.command = {
+            command: 'viper.pruneMethodOrFunction',
+            title: title,
+            arguments: [document.uri, range.start.line, mode]
+        };
+        return action;
+    }
+}
+
+
+export function registerPruneActions(context: vscode.ExtensionContext): void {
+    // Register the code action provider
+    const provider = new PruneCodeActionProvider();
+    const providerRegistration = vscode.languages.registerCodeActionsProvider(
+        { scheme: 'file', language: 'viper' },
+        provider,
+        {
+            providedCodeActionKinds: PruneCodeActionProvider.providedCodeActionKinds
+        }
+    );
+    context.subscriptions.push(providerRegistration);
+
+    // Register the prune command
+    const pruneCommand = vscode.commands.registerCommand(
+        'viper.pruneMethodOrFunction',
+        async (uri: vscode.Uri, lineNumber: number, mode: 'pruneBelow' | 'pruneReplace') => {
+            if (mode === 'pruneBelow') {
+                await insertTextBelowMethod(uri, lineNumber);
+            } else {
+                await replaceMethod(uri, lineNumber);
+            }
+        }
+    );
+    context.subscriptions.push(pruneCommand);
+}
+
+
+async function replaceMethod(uri: vscode.Uri, startLineNumber: number): Promise<void> {
+    const document = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(document);
+    
+    // Find the opening brace
+    let openBracePos: vscode.Position | undefined;
+    for (let i = startLineNumber; i < document.lineCount; i++) {
+        const lineText = document.lineAt(i).text;
+        const braceIndex = lineText.indexOf('{');
+        if (braceIndex !== -1) {
+            openBracePos = new vscode.Position(i, braceIndex);
+            break;
+        }
+    }
+    
+    if (!openBracePos) {
+        vscode.window.showErrorMessage('Could not find opening brace for method/function');
+        return;
+    }
+    
+    // Find matching closing brace
+    const closeBracePos = await findMatchingBrace(document, openBracePos);
+    if (!closeBracePos) {
+        vscode.window.showErrorMessage('Could not find closing brace for method/function');
+        return;
+    }
+    
+    // Create range from start of method to end of closing brace line
+    const methodStartPosition = new vscode.Position(startLineNumber, 0);
+    const methodEndLine = document.lineAt(closeBracePos.line);
+    const endPosition = new vscode.Position(closeBracePos.line, methodEndLine.text.length);
+    const replaceRange = new vscode.Range(methodStartPosition, endPosition);
+    
+    // Save the original text for potential undo
+    const originalText = document.getText(replaceRange);
+    
+    // Apply the preview edit
+    const replacementText = 'New method\n\nNew method end';
+    const previewSuccess = await editor.edit(editBuilder => {
+        editBuilder.replace(replaceRange, replacementText);
+    }, { undoStopBefore: true, undoStopAfter: false });
+    
+    if (!previewSuccess) {
+        vscode.window.showErrorMessage('Could not create preview');
+        return;
+    }
+    
+    // Select the new text to highlight it
+    const newTextEnd = new vscode.Position(methodStartPosition.line + 3, 'New method end'.length);
+    editor.selection = new vscode.Selection(methodStartPosition, newTextEnd);
+    editor.revealRange(new vscode.Range(methodStartPosition, newTextEnd), vscode.TextEditorRevealType.InCenter);
+    
+    try {
+        // Show confirmation dialog
+        const choice = await vscode.window.showQuickPick(
+            ['Accept: Keep New Method', 'Cancel: Undo Changes'],
+            { placeHolder: 'Preview of replacement shown. Accept or undo?' }
+        );
+        
+        if (choice?.startsWith('Accept')) {
+            // Put edit on the undo stack
+            await editor.edit(() => {}, { undoStopBefore: false, undoStopAfter: true });
+            
+            vscode.window.showInformationMessage('Method replaced successfully');
+        } else {
+            // Undo the preview change
+            await vscode.commands.executeCommand('undo');
+            
+            // Restore cursor position
+            const originalPosition = new vscode.Position(startLineNumber, 0);
+            editor.selection = new vscode.Selection(originalPosition, originalPosition);
+        }
+    } catch (error) {
+        // If something goes wrong, try to undo
+        await vscode.commands.executeCommand('undo');
+        throw error;
+    }
+}
+
+
+
+async function findMatchingBrace(document: vscode.TextDocument, openBracePos: vscode.Position): Promise<vscode.Position | undefined> {
+    const editor = await vscode.window.showTextDocument(document);
+    const originalSelection = editor.selection;
+    
+    // Set cursor to opening brace and use VS Code's bracket matching
+    editor.selection = new vscode.Selection(openBracePos, openBracePos);
+    await vscode.commands.executeCommand('editor.action.jumpToBracket');
+    
+    const closeBracePos = editor.selection.active;
+    
+    // Restore original selection
+    editor.selection = originalSelection;
+    
+    return closeBracePos;
+}
+
+/**
+ * Finds the end of a method or function and inserts "New method" two lines below it.
+ */
+async function insertTextBelowMethod(uri: vscode.Uri, startLineNumber: number): Promise<void> {
+    const document = await vscode.workspace.openTextDocument(uri);
+    
+    // Find the opening brace on or after the start line
+    let openBracePos: vscode.Position | undefined;
+    for (let i = startLineNumber; i < document.lineCount; i++) {
+        const lineText = document.lineAt(i).text;
+        const braceIndex = lineText.indexOf('{');
+        if (braceIndex !== -1) {
+            openBracePos = new vscode.Position(i, braceIndex);
+            break;
+        }
+    }
+    
+    if (!openBracePos) {
+        vscode.window.showErrorMessage('Could not find opening brace for method/function');
+        return;
+    }
+    
+    // Use VS Code's bracket matching to find closing brace
+    const closeBracePos = await findMatchingBrace(document, openBracePos);
+    if (!closeBracePos) {
+        vscode.window.showErrorMessage('Could not find closing brace for method/function');
+        return;
+    }
+    
+    const endLineNumber = closeBracePos.line;
+    const insertLineNumber = endLineNumber + 1;
+    const insertPosition = new vscode.Position(insertLineNumber, 0);
+    
+    const editor = await vscode.window.showTextDocument(document);
+    await editor.edit(editBuilder => {
+        editBuilder.insert(insertPosition, '\nNew method\n\nNew method end\n');
+    });
+}
+
+
