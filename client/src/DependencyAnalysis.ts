@@ -43,6 +43,7 @@ interface GraphNode {
         nodeCategories: string[];
         content?: string;
         externalDependencyCount?: number;
+        externalDependencies?: { [fileName: string]: number[] };
     };
 }
 
@@ -276,6 +277,10 @@ export class DependencyAnalysis {
                                 message.showDependents
                             );
                             return;
+                        case 'openFile':
+                            // User clicked on external file name in external dependency popup
+                            void this.openExternalFile(message.fileName, message.lineNumber);
+                            return;
                     }
                 }
             );
@@ -473,10 +478,9 @@ export class DependencyAnalysis {
                     const lineNumber = parseInt(posMatch[2], 10);
                     
                     nodeIdToFile.set(nodeId, fileName);
+                    nodeIdToLine.set(nodeId, lineNumber);
                     
                     if (fileName === analyzedFileName) {
-                        nodeIdToLine.set(nodeId, lineNumber);
-                        
                         const categories = this.getNodeCategories(nodeType, assumptionType);
                         
                         // Merge categories if line already exists
@@ -493,7 +497,7 @@ export class DependencyAnalysis {
         }
         
         const edgesPath = path.join(exportDir, 'edges.csv');
-        const externalDependencyCounts = new Map<number, number>();  // lineNumber -> count
+        const externalDependenciesByFile = new Map<number, Map<string, number[]>>();
         const nodes = new Set<number>();
         const edges: Array<{source: number, target: number}> = [];
         
@@ -512,17 +516,35 @@ export class DependencyAnalysis {
                 const targetId = parts[1].trim();
                 
                 const sourceLine = nodeIdToLine.get(sourceId);
-                const targetLine = nodeIdToLine.get(targetId);
                 const sourceFile = nodeIdToFile.get(sourceId);
+                const targetLine = nodeIdToLine.get(targetId);
+                const targetFile = nodeIdToFile.get(targetId);
                 
-                // Count external dependencies: target in our file, source from different file
-                if (targetLine !== undefined && sourceFile && sourceFile !== analyzedFileName) {
-                    const currentCount = externalDependencyCounts.get(targetLine) || 0;
-                    externalDependencyCounts.set(targetLine, currentCount + 1);
+                // Track external dependencies: target in our file, source from different file
+                if (targetLine !== undefined && targetFile === analyzedFileName && sourceFile && sourceFile !== analyzedFileName) {
+                    const sourceLineInExternalFile = nodeIdToLine.get(sourceId);
+                    
+                    if (!externalDependenciesByFile.has(targetLine)) {
+                        externalDependenciesByFile.set(targetLine, new Map());
+                    }
+                    const fileMap = externalDependenciesByFile.get(targetLine)!;
+                    
+                    if (!fileMap.has(sourceFile)) {
+                        fileMap.set(sourceFile, []);
+                    }
+                    if (sourceLineInExternalFile !== undefined) {
+                        const lineArray = fileMap.get(sourceFile)!;
+                        // Only add if not already present (avoid duplicates)
+                        if (!lineArray.includes(sourceLineInExternalFile)) {
+                            lineArray.push(sourceLineInExternalFile);
+                        }
+                    }
                 }
                 
                 // Build graph edges: both endpoints in analyzed file
-                if (sourceLine !== undefined && targetLine !== undefined && sourceLine !== targetLine) {
+                if (sourceLine !== undefined && sourceFile === analyzedFileName && 
+                    targetLine !== undefined && targetFile === analyzedFileName && 
+                    sourceLine !== targetLine) {
                     const edgeKey = `${sourceLine},${targetLine}`;
                     if (!seenEdgeKeys.has(edgeKey)) {
                         seenEdgeKeys.add(edgeKey);
@@ -537,7 +559,23 @@ export class DependencyAnalysis {
         return {
             nodes: Array.from(nodes).map(id => {
                 const { lineType, assignmentVariable } = this.getLineType(lineContents.get(id) || '');
-                const externalDepCount = externalDependencyCounts.get(id) || 0;
+                
+                // Calculate count from actual unique line numbers in externalDependenciesByFile
+                let externalDepCount = 0;
+                const fileMap = externalDependenciesByFile.get(id);
+                if (fileMap) {
+                    fileMap.forEach((lines) => {
+                        externalDepCount += lines.length;
+                    });
+                }
+                
+                // Convert Map to plain object for JSON serialization
+                const externalDeps: { [fileName: string]: number[] } = {};
+                if (fileMap) {
+                    fileMap.forEach((lines, fileName) => {
+                        externalDeps[fileName] = lines.sort((a, b) => a - b); // Sort line numbers
+                    });
+                }
                 
                 return { 
                     data: { 
@@ -547,7 +585,8 @@ export class DependencyAnalysis {
                         assignmentVariable: assignmentVariable,
                         nodeCategories: nodeCategories.get(id) || ['Unknown'],
                         content: lineContents.get(id) || '',
-                        externalDependencyCount: externalDepCount
+                        externalDependencyCount: externalDepCount,
+                        externalDependencies: Object.keys(externalDeps).length > 0 ? externalDeps : undefined
                     } 
                 };
             }),
@@ -627,6 +666,57 @@ export class DependencyAnalysis {
         }
         
         return { lineType, assignmentVariable };
+    }
+
+    private static async openExternalFile(fileName: string, lineNumber?: number): Promise<void> {
+        try {
+            // Resolve the file path relative to the workspace
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders || workspaceFolders.length === 0) {
+                Log.log('No workspace folder found', LogLevel.Debug);
+                return;
+            }
+
+            // Try to find the file in the workspace
+            const files = await vscode.workspace.findFiles('**/' + fileName);
+            
+            if (files.length === 0) {
+                vscode.window.showWarningMessage(`Could not find file: ${fileName}`);
+                return;
+            }
+
+            const fileUri = files[0];
+            
+            // Find the editor column of the analyzed file to open in the same location
+            let viewColumn = vscode.ViewColumn.One;
+            if (this.analyzedFileUri) {
+                const analyzedEditor = vscode.window.visibleTextEditors.find(
+                    e => e.document.uri.fsPath === this.analyzedFileUri!.fsPath
+                );
+                if (analyzedEditor) {
+                    viewColumn = analyzedEditor.viewColumn || vscode.ViewColumn.One;
+                }
+            }
+            
+            // Open the document in the same view column as the analyzed file
+            const document = await vscode.workspace.openTextDocument(fileUri);
+            const editor = await vscode.window.showTextDocument(document, viewColumn);
+
+            // If line number specified, jump to that line
+            if (lineNumber && lineNumber > 0) {
+                const position = new vscode.Position(lineNumber - 1, 0);
+                editor.selection = new vscode.Selection(position, position);
+                editor.revealRange(
+                    new vscode.Range(position, position),
+                    vscode.TextEditorRevealType.InCenter
+                );
+            }
+
+            Log.log(`Opened external file: ${fileName} at line ${lineNumber || 'start'}`, LogLevel.Debug);
+        } catch (error) {
+            Log.log(`Error opening external file ${fileName}: ${error}`, LogLevel.Debug);
+            vscode.window.showErrorMessage(`Error opening file: ${fileName}`);
+        }
     }
 
     private static highlightLines(lineNumber: number, neighbors: number[], indirectNeighbors: number[] = [], showDependents: boolean = false): void {
@@ -780,6 +870,7 @@ export class DependencyAnalysis {
             </div>
             <div id="cy"></div>
             <div id="tooltip"></div>
+            <div id="externalDepPopup"></div>
             ${graphScript}
         </body>
         </html>`;
@@ -941,6 +1032,46 @@ export class DependencyAnalysis {
             }
             #filterPanel .filter-actions button:hover {
                 background-color: #4e4e52;
+            }
+            #externalDepPopup {
+                position: absolute;
+                display: none;
+                background-color: #2d2d30;
+                border: 1px solid #454545;
+                border-radius: 4px;
+                padding: 12px;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-size: 12px;
+                max-width: 400px;
+                max-height: 300px;
+                overflow-y: auto;
+                z-index: 2000;
+                pointer-events: auto;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+            }
+            #externalDepPopup h4 {
+                margin: 0 0 8px 0;
+                color: #cccccc;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            #externalDepPopup .file-entry {
+                margin-bottom: 10px;
+            }
+            #externalDepPopup .file-name {
+                color: #569cd6;
+                cursor: pointer;
+                text-decoration: underline;
+                font-weight: 500;
+                margin-bottom: 4px;
+            }
+            #externalDepPopup .file-name:hover {
+                color: #7eb6e8;
+            }
+            #externalDepPopup .line-list {
+                color: #d4d4d4;
+                margin-left: 12px;
+                font-size: 11px;
             }
         </style>`;
     }
@@ -1394,6 +1525,9 @@ export class DependencyAnalysis {
 
     private static getTooltipHandlers(): string {
         return /* javascript */`const tooltip = document.getElementById('tooltip');
+            const externalDepPopup = document.getElementById('externalDepPopup');
+            let popupHideTimeout = null;
+            let popupShowTimeout = null;
             
             cy.on('mouseover', 'node', function(evt) {
                 const node = evt.target;
@@ -1407,14 +1541,145 @@ export class DependencyAnalysis {
                 }
             });
             
+            // Global mousemove to detect badge hover
+            cy.on('mousemove', function(evt) {
+                const mouseX = evt.position.x;
+                const mouseY = evt.position.y;
+                
+                // Check all nodes to see if mouse is over any badge
+                let foundBadge = false;
+                cy.nodes().forEach(function(node) {
+                    const externalDeps = node.data('externalDependencies');
+                    const externalDepCount = node.data('externalDependencyCount') || 0;
+                    
+                    if (externalDepCount > 0 && externalDeps) {
+                        const nodePos = node.position();
+                        const nodeWidth = node.width();
+                        const nodeHeight = node.height();
+                        
+                        // Badge hit area in graph coordinates (SVG space scaled to node size)
+                        const scaleX = nodeWidth / 80;
+                        const scaleY = nodeHeight / 80;
+                        
+                        const digitCount = externalDepCount.toString().length;
+                        const badgeWidth = 9 + 2 * digitCount;
+                        
+                        const hitAreaLeft_SVG = 0;
+                        const hitAreaRight_SVG = 1.5 + 2 * badgeWidth + 5;
+                        const hitAreaTop_SVG = 0;
+                        const hitAreaBottom_SVG = 20;
+                        
+                        // Convert to graph coordinates
+                        const hitAreaLeft = nodePos.x - nodeWidth / 2 + hitAreaLeft_SVG * scaleX;
+                        const hitAreaRight = nodePos.x - nodeWidth / 2 + hitAreaRight_SVG * scaleX;
+                        const hitAreaTop = nodePos.y - nodeHeight / 2 + hitAreaTop_SVG * scaleY;
+                        const hitAreaBottom = nodePos.y - nodeHeight / 2 + hitAreaBottom_SVG * scaleY;
+                        
+                        const isOverBadge = mouseX >= hitAreaLeft && mouseX <= hitAreaRight &&
+                                           mouseY >= hitAreaTop && mouseY <= hitAreaBottom;
+                        
+                        if (isOverBadge) {
+                            foundBadge = true;
+                            
+                            if (popupHideTimeout) {
+                                clearTimeout(popupHideTimeout);
+                                popupHideTimeout = null;
+                            }
+                            
+                            // Show popup after short delay if not already visible
+                            if (externalDepPopup.style.display !== 'block' && !popupShowTimeout) {
+                                popupShowTimeout = setTimeout(() => {
+                                    showExternalDependencyPopup(externalDeps, evt.originalEvent.pageX, evt.originalEvent.pageY);
+                                    popupShowTimeout = null;
+                                }, 50);
+                            }
+                        }
+                    }
+                });
+                
+                // Hide popup if not over any badge
+                if (!foundBadge) {
+                    if (popupShowTimeout) {
+                        clearTimeout(popupShowTimeout);
+                        popupShowTimeout = null;
+                    }
+                    
+                    if (externalDepPopup.style.display === 'block' && !popupHideTimeout) {
+                        popupHideTimeout = setTimeout(() => {
+                            externalDepPopup.style.display = 'none';
+                            popupHideTimeout = null;
+                        }, 300);
+                    }
+                }
+            });
+            
             cy.on('mousemove', 'node', function(evt) {
+                const node = evt.target;
+                
+                // Update tooltip position
                 tooltip.style.left = (evt.originalEvent.pageX + 15) + 'px';
                 tooltip.style.top = (evt.originalEvent.pageY + 15) + 'px';
+            });
+            
+            cy.on('mouseover', 'node', function(evt) {
+                const node = evt.target;
+                
+                // Show tooltip when over node
+                const lineNumber = node.data('lineNumber');
+                const content = node.data('content');
+                tooltip.innerHTML = '<span class="line-number">' + lineNumber + '</span><span class="line-content">' + content + '</span>';
+                tooltip.style.display = 'block';
             });
             
             cy.on('mouseout', 'node', function(evt) {
                 tooltip.style.display = 'none';
             });
+            
+            // Keep popup open when hovering over it
+            externalDepPopup.addEventListener('mouseenter', function() {
+                if (popupHideTimeout) {
+                    clearTimeout(popupHideTimeout);
+                    popupHideTimeout = null;
+                }
+            });
+            
+            externalDepPopup.addEventListener('mouseleave', function() {
+                if (!popupHideTimeout) {
+                    popupHideTimeout = setTimeout(() => {
+                        externalDepPopup.style.display = 'none';
+                        popupHideTimeout = null;
+                    }, 300);
+                }
+            });
+            
+            function showExternalDependencyPopup(externalDeps, x, y) {
+                let html = '<h4>External Dependencies</h4>';
+                
+                for (const fileName in externalDeps) {
+                    const lines = externalDeps[fileName];
+                    html += '<div class="file-entry">';
+                    html += '<div class="file-name" data-file="' + escapeHtml(fileName) + '">' + escapeHtml(fileName) + '</div>';
+                    html += '<div class="line-list">Lines: ' + lines.join(', ') + '</div>';
+                    html += '</div>';
+                }
+                
+                externalDepPopup.innerHTML = html;
+                externalDepPopup.style.left = (x + 5) + 'px';
+                externalDepPopup.style.top = (y + 5) + 'px';
+                externalDepPopup.style.display = 'block';
+                
+                // Add click handlers for file names
+                const fileNames = externalDepPopup.querySelectorAll('.file-name');
+                fileNames.forEach(el => {
+                    el.addEventListener('click', function() {
+                        const fileName = el.getAttribute('data-file');
+                        vscode.postMessage({
+                            command: 'openFile',
+                            fileName: fileName
+                        });
+                    });
+                });
+            }
             
             function escapeHtml(text) {
                 const div = document.createElement('div');
