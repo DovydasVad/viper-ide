@@ -415,10 +415,10 @@ export class DependencyAnalysis {
         
         // Trigger reverification when dependency analysis is enabled
         if (newDependencyAnalysisEnabled) {
-            const fileUri = Helper.getActiveFileUri();
-            if (fileUri && Helper.isViperSourceFile(fileUri)) {
+            const activeFile = Helper.getActiveFileUri();
+            if (activeFile && Helper.isViperSourceFile(activeFile[0])) {
                 Log.log("Dependency Analysis enabled - triggering reverification", LogLevel.Info);
-                State.addToWorklist(new Task({ type: TaskType.Verify, uri: fileUri, manuallyTriggered: true }));
+                State.addToWorklist(new Task({ type: TaskType.Verify, uri: activeFile[0], manuallyTriggered: true }));
             }
         } else {
             // Close the dependency graph panel when dependency analysis is disabled
@@ -1630,7 +1630,7 @@ export class DependencyAnalysis {
                 // Show tooltip when over node
                 const lineNumber = node.data('lineNumber');
                 const content = node.data('content');
-                tooltip.innerHTML = '<span class="line-number">' + lineNumber + '</span><span class="line-content">' + content + '</span>';
+                tooltip.innerHTML = '<span class="line-number">' + lineNumber + ':</span><span class="line-content">' + content + '</span>';
                 tooltip.style.display = 'block';
             });
             
