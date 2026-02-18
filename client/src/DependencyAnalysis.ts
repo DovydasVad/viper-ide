@@ -1346,6 +1346,9 @@ export class DependencyAnalysis {
 
                 node.addClass('selected');
                 
+                // Update filter counts for the selected node's dependencies / dependents
+                updateCategoryCounts(related.nodes());
+                
                 // Apply filters AFTER highlight classes are set
                 applyFilters();
                 
@@ -1456,29 +1459,33 @@ export class DependencyAnalysis {
                 'ImplicitAssertion': true
             };
             
-            // Calculate node counts for each category
-            const categoryCounts = {
-                'ExplicitAssumption': 0,
-                'ImplicitAssumption': 0,
-                'ExplicitAssertion': 0,
-                'ExplicitAssertionPostcondition': 0,
-                'ImplicitAssertion': 0
-            };
-            
-            cy.nodes().forEach(function(node) {
-                const categories = node.data('nodeCategories') || [];
-                categories.forEach(function(category) {
-                    if (categoryCounts[category] !== undefined) {
-                        categoryCounts[category]++;
-                    }
+            // Update filter panel counts for a given set of nodes
+            function updateCategoryCounts(nodes) {
+                const counts = {
+                    'ExplicitAssumption': 0,
+                    'ImplicitAssumption': 0,
+                    'ExplicitAssertion': 0,
+                    'ExplicitAssertionPostcondition': 0,
+                    'ImplicitAssertion': 0
+                };
+                
+                nodes.forEach(function(node) {
+                    const categories = node.data('nodeCategories') || [];
+                    categories.forEach(function(category) {
+                        if (counts[category] !== undefined) {
+                            counts[category]++;
+                        }
+                    });
                 });
-            });
+                
+                document.querySelector('#filter-ExplicitAssumption + .count').textContent = '(' + counts.ExplicitAssumption + ')';
+                document.querySelector('#filter-ImplicitAssumption + .count').textContent = '(' + counts.ImplicitAssumption + ')';
+                document.querySelector('#filter-ExplicitAssertion + .count').textContent = '(' + (counts.ExplicitAssertion + counts.ExplicitAssertionPostcondition) + ')';
+                document.querySelector('#filter-ImplicitAssertion + .count').textContent = '(' + counts.ImplicitAssertion + ')';
+            }
             
-            // Update count displays
-            document.querySelector('#filter-ExplicitAssumption + .count').textContent = '(' + categoryCounts.ExplicitAssumption + ')';
-            document.querySelector('#filter-ImplicitAssumption + .count').textContent = '(' + categoryCounts.ImplicitAssumption + ')';
-            document.querySelector('#filter-ExplicitAssertion + .count').textContent = '(' + (categoryCounts.ExplicitAssertion + categoryCounts.ExplicitAssertionPostcondition) + ')';
-            document.querySelector('#filter-ImplicitAssertion + .count').textContent = '(' + categoryCounts.ImplicitAssertion + ')';
+            // Initial counts: all nodes
+            updateCategoryCounts(cy.nodes());
             
             // Function to apply filters to nodes
             function applyFilters() {
@@ -1768,6 +1775,9 @@ export class DependencyAnalysis {
                 if (selectedNode && selectedNode.id() === node.id()) {
                     selectedNode = null;
                     cy.elements().removeClass('selected direct indirect direct-dependent indirect-dependent dimmed filtered');
+                    
+                    // Reset filter counts to all nodes
+                    updateCategoryCounts(cy.nodes());
                     
                     // Send message to code view to clear code highlights
                     vscode.postMessage({
