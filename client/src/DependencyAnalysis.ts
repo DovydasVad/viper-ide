@@ -151,10 +151,10 @@ export class DependencyAnalysis {
                 if (!line.trim()) continue;
                 
                 const parts = line.split('#');
-                if (parts.length < 6) continue;
+                if (parts.length < 7) continue;
                 
                 const nodeId = parts[0].trim();
-                const position = parts[5].trim();
+                const position = parts[6].trim();
                 
                 // Extract line number from position (e.g., "file.vpr @ line 4")
                 const lineMatch = position.match(/line (\d+)/);
@@ -467,18 +467,21 @@ export class DependencyAnalysis {
                 if (!line.trim()) continue;
                 
                 const parts = line.split('#');
-                if (parts.length < 6) continue;
+                if (parts.length < 7) continue;
                 
                 const nodeId = parts[0].trim();
                 const nodeType = parts[1].trim();
                 const assumptionType = parts[2].trim();
-                const position = parts[5].trim();
+                const position = parts[6].trim();
                 
-                // Extract file name and line number from position (e.g., "file.vpr @ line 4")
-                const posMatch = position.match(/^(.+?)\s+@\s+line\s+(\d+)/);
+                // Extract file name and line number from position (e.g., "(file.vpr @ line 4)" or "file.vpr @ line 4")
+                const posMatch = position.match(/\(([^()]+?)\s+@\s+line\s+(\d+)\)\s*$/)
+                    || position.match(/(.+?)\s+@\s+line\s+(\d+)\s*$/);
                 if (posMatch) {
                     const fileName = posMatch[1].trim();
                     const lineNumber = parseInt(posMatch[2], 10);
+                    Log.log(fileName, LogLevel.Default);
+                    Log.log(lineNumber.toString(), LogLevel.Default);
                     
                     nodeIdToFile.set(nodeId, fileName);
                     nodeIdToLine.set(nodeId, lineNumber);
@@ -501,8 +504,7 @@ export class DependencyAnalysis {
         
         const edgesPath = path.join(exportDir, 'edges.csv');
         const externalDependenciesByFile = new Map<number, Map<string, number[]>>();
-        const nodes = new Set<number>();
-        const edges: Array<{source: number, target: number}> = [];
+        const rawEdges: Array<{source: number, target: number}> = [];
         
         if (fs.existsSync(edgesPath)) {
             const edgesContent = fs.readFileSync(edgesPath, 'utf-8');
@@ -551,12 +553,73 @@ export class DependencyAnalysis {
                     const edgeKey = `${sourceLine},${targetLine}`;
                     if (!seenEdgeKeys.has(edgeKey)) {
                         seenEdgeKeys.add(edgeKey);
-                        nodes.add(sourceLine);
-                        nodes.add(targetLine);
-                        edges.push({ source: sourceLine, target: targetLine });
+
+                        rawEdges.push({ source: sourceLine, target: targetLine });
                     }
                 }
             }
+        }
+
+        const parentMap = new Map<number, Set<number>>();
+        for (const edge of rawEdges) {
+            if (!parentMap.has(edge.target)) {
+                parentMap.set(edge.target, new Set());
+            }
+            parentMap.get(edge.target)!.add(edge.source);
+        }
+
+        // Recursively find "real" sources: ancestors that don't have both InternalAssumption and ExplicitAssertion.
+        // If a node has both InternalAssumption AND ExplicitAssertion, look through it to its parents.
+        const shouldBypass = (categories: string[]): boolean => {
+            return categories.includes('InternalAssumption') && categories.includes('ExplicitAssertion');
+        };
+
+        const resolveRealSources = (line: number, visited: Set<number>): number[] => {
+            if (visited.has(line)) return [];
+            visited.add(line);
+
+            const categories = nodeCategories.get(line) || [];
+            if (!shouldBypass(categories)) {
+                return [line];
+            }
+
+            // This node has both InternalAssumption and ExplicitAssertion - bypass it, recurse to its parents
+            const parents = parentMap.get(line);
+            if (!parents || parents.size === 0) {
+                return [line]; // No parents to bypass to - keep the node as source
+            }
+
+            const realSources: number[] = [];
+            for (const parent of parents) {
+                realSources.push(...resolveRealSources(parent, visited));
+            }
+            return realSources;
+        };
+
+        // Rebuild edges with InternalAssumption bypass applied
+        const nodes = new Set<number>();
+        const edges: Array<{source: number, target: number}> = [];
+        const resolvedEdgeKeys = new Set<string>();
+
+        for (const edge of rawEdges) {
+            const realSources = resolveRealSources(edge.source, new Set());
+
+            for (const realSource of realSources) {
+                if (realSource === edge.target) continue; // no self-edges
+                const edgeKey = `${realSource},${edge.target}`;
+                if (!resolvedEdgeKeys.has(edgeKey)) {
+                    resolvedEdgeKeys.add(edgeKey);
+                    nodes.add(realSource);
+                    nodes.add(edge.target);
+                    edges.push({ source: realSource, target: edge.target });
+                }
+            }
+        }
+
+        // Also ensure nodes that only appear as targets of bypassed edges are still included
+        for (const edge of rawEdges) {
+            nodes.add(edge.source);
+            nodes.add(edge.target);
         }
 
         return {
