@@ -27,7 +27,7 @@ const boogieMacARMDownloadUrl = (version: string) => `https://github.com/viperpr
 
 const viperServerVersionFile = 'viperserver-version';
 const viperServerOutputDir = path.resolve(__dirname, 'dependencies/ViperTools/backends');
-const viperServerDownloadUrl = (version: string) => `https://github.com/DovydasVad/viperserver/releases/download/v1.1/viperserver.jar`;
+const viperServerDownloadUrl = (version: string) => `https://github.com/DovydasVad/viperserver/releases/download/v1.1.1/viperserver.jar`;
 
 const z3VersionFile = 'z3-version';
 const z3OutputDir = path.resolve(__dirname, 'dependencies/ViperTools/z3');
