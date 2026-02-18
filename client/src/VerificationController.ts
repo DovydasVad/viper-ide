@@ -21,6 +21,7 @@ import { Color } from './StatusBar';
 import { Settings } from './Settings';
 import { restart } from './extension';
 import { ProjectManager } from './ProjectManager';
+import { DependencyAnalysis } from './DependencyAnalysis';
 
 export interface ITask {
     type: TaskType;
@@ -759,6 +760,10 @@ export class VerificationController {
                                 State.statusBarItem.update("$(check) " + msg, nofWarnings == 0 ? Color.SUCCESS : Color.WARNING);
                                 if (params.manuallyTriggered > 0) {
                                     Log.hint(msg);
+                                }
+
+                                if (State.activeBackend.type === "silicon" && State.dependencyAnalysis) {
+                                    DependencyAnalysis.performDependencyAnalysis(uri).catch(err => Log.error(`Failed to perform dependency analysis: ${err}`));
                                 }
                                 break;
                             case Success.ParsingFailed:

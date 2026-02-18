@@ -51,6 +51,7 @@ export class State {
     public static unitTest: UnitTestCallback;
 
     public static autoVerify = true;
+    public static dependencyAnalysis = false;
 
     //status bar
     public static statusBarItem: StatusBar;

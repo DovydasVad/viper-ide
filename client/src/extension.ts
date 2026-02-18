@@ -30,6 +30,7 @@ import { Color } from './StatusBar';
 import { VerificationController, TaskType, Task } from './VerificationController';
 import { ViperApi } from './ViperApi';
 import { Settings } from './Settings';
+import { DependencyAnalysis } from './DependencyAnalysis';
 import { Location } from 'vs-verification-toolbox';
 
 let fileSystemWatcher: vscode.FileSystemWatcher;
@@ -71,6 +72,7 @@ async function internalActivate(context: vscode.ExtensionContext): Promise<Viper
     await Settings.handleSettingsCheckResult(startResult);
     State.viperApi = new ViperApi(State.client);
     registerClientHandlers();
+    DependencyAnalysis.registerCommands(context);
     await initializeState(location);
     if (State.unitTest) State.unitTest.extensionActivated();
     activated = true;

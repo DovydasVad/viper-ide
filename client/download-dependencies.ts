@@ -6,7 +6,7 @@
   * Copyright (c) 2011-2023 ETH Zurich.
   */
 
-import * as fs from 'fs-extra';
+import * as fs from 'fs-extra';   // cd viper-ide/client && npm install --save-dev @types/fs-extra
 import * as path from 'path';
 // we use 'vs-verification-toolbox/out/dependencies' instead of 'vs-verification-toolbox' to avoid loading exports that
 // depend on 'vscode' since this file should be executed outside of a vscode context, i.e., as a regular node script
@@ -27,7 +27,7 @@ const boogieMacARMDownloadUrl = (version: string) => `https://github.com/viperpr
 
 const viperServerVersionFile = 'viperserver-version';
 const viperServerOutputDir = path.resolve(__dirname, 'dependencies/ViperTools/backends');
-const viperServerDownloadUrl = (version: string) => `https://github.com/viperproject/viperserver/releases/download/${version}/viperserver.jar`;
+const viperServerDownloadUrl = (version: string) => `https://github.com/DovydasVad/viperserver/releases/download/v1.1.1/viperserver.jar`;
 
 const z3VersionFile = 'z3-version';
 const z3OutputDir = path.resolve(__dirname, 'dependencies/ViperTools/z3');

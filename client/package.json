@@ -114,6 +114,16 @@
 				"category": "Viper"
 			},
 			{
+				"command": "viper.toggleDependencyAnalysis",
+				"title": "toggle dependency analysis",
+				"category": "Viper"
+			},
+			{
+				"command": "viper.showDependencyGraph",
+				"title": "show dependency graph",
+				"category": "Viper"
+			},
+			{
 				"command": "viper.openLogFile",
 				"title": "open current logFile",
 				"category": "Viper"
@@ -163,6 +173,16 @@
 				},
 				{
 					"command": "viper.toggleAutoVerify",
+					"when": "resourceLangId == viper",
+					"group": "Viper"
+				},
+				{
+					"command": "viper.toggleDependencyAnalysis",
+					"when": "resourceLangId == viper",
+					"group": "Viper"
+				},
+				{
+					"command": "viper.showDependencyGraph",
 					"when": "resourceLangId == viper",
 					"group": "Viper"
 				},
@@ -405,7 +425,7 @@
 				},
 				"viper.verificationBackends.symbolicExecution.verificationStage.customArguments": {
 					"type": "string",
-					"default": "--z3Exe $z3Exe$ $disableCaching$",
+					"default": "--z3Exe $z3Exe$ $disableCaching$ $dependencyGraphExport$",
 					"description": "The command line arguments used for starting the stage."
 				},
 				"viper.verificationBackends.symbolicExecution.verificationStage.onParsingError": {

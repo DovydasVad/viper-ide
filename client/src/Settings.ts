@@ -747,11 +747,15 @@ export class Settings {
         const verificationStage = backend.stages.filter(stage => stage.isVerification)[0];
         const z3Path = await Settings.getZ3Path(location);
         const disableCaching = Settings.getConfiguration("viperServer").disableCaching === true;
+        const enableDependencyAnalysis = State.dependencyAnalysis;
         const partiallyReplacedString = verificationStage.customArguments
             // note that we use functions as 2nd argument since we do not want that
             // the special replacement patterns kick in
             .replace("$z3Exe$", () => `"${z3Path}"`) // escape path
             .replace("$disableCaching$", () => disableCaching ? "--disableCaching" : "")
+            .replace("$dependencyGraphExport$", () => enableDependencyAnalysis 
+            ? '--disableCaching --disableInfeasibilityChecks --enableDependencyAnalysis --proverArgs "proof=true unsat-core=true" --dependencyAnalysisExportPath "graphExports"'
+            : "")
             .replace("$fileToVerify$", () => `"${fileUri.fsPath}"`); // escape path (not used since v3)
 
         // Note that we need to passes over the string because `replace` does not allow async replace functions.
