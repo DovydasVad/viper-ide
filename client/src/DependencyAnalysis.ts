@@ -568,10 +568,10 @@ export class DependencyAnalysis {
             parentMap.get(edge.target)!.add(edge.source);
         }
 
-        // Recursively find "real" sources: ancestors that don't have both InternalAssumption and ExplicitAssertion.
-        // If a node has both InternalAssumption AND ExplicitAssertion, look through it to its parents.
+        // Recursively find "real" sources: ancestors that don't have ExplicitAssertion.
+        // If a node has both ExplicitAssertion, look through it to its parents.
         const shouldBypass = (categories: string[]): boolean => {
-            return categories.includes('InternalAssumption') && categories.includes('ExplicitAssertion');
+            return categories.includes('ExplicitAssertion');
         };
 
         const resolveRealSources = (line: number, visited: Set<number>): number[] => {
@@ -583,7 +583,7 @@ export class DependencyAnalysis {
                 return [line];
             }
 
-            // This node has both InternalAssumption and ExplicitAssertion - bypass it, recurse to its parents
+            // This node has ExplicitAssertion - bypass it, recurse to its parents
             const parents = parentMap.get(line);
             if (!parents || parents.size === 0) {
                 return [line]; // No parents to bypass to - keep the node as source
@@ -596,7 +596,7 @@ export class DependencyAnalysis {
             return realSources;
         };
 
-        // Rebuild edges with InternalAssumption bypass applied
+        // Rebuild edges with bypass applied
         const nodes = new Set<number>();
         const edges: Array<{source: number, target: number}> = [];
         const resolvedEdgeKeys = new Set<string>();
@@ -672,16 +672,16 @@ export class DependencyAnalysis {
         if (nodeType === 'Assumption') {
             if (assumptionType === 'Explicit') {
                 categories.push('ExplicitAssumption');
-            } else if (assumptionType === 'Internal') {
-                categories.push('InternalAssumption');
             } else {
                 categories.push('ImplicitAssumption');  // PathCondition, LoopInvariant, Implicit, and all other fine-grained assumption types
             }
         }
         
         if (nodeType === 'Assertion') {
-            if (assumptionType === 'Explicit' || assumptionType === 'ImplicitPostcondition' || assumptionType === 'ExplicitPostcondition') {
+            if (assumptionType === 'Explicit') {
                 categories.push('ExplicitAssertion');
+            } else if (assumptionType === 'ImplicitPostcondition' || assumptionType === 'ExplicitPostcondition') {
+                categories.push('ExplicitAssertionPostcondition');
             } else {
                 categories.push('ImplicitAssertion');
             }
@@ -916,10 +916,6 @@ export class DependencyAnalysis {
                 <label>
                     <input type="checkbox" id="filter-ImplicitAssumption" checked>
                     Implicit Assumptions <span class="count">(0)</span>
-                </label>
-                <label>
-                    <input type="checkbox" id="filter-InternalAssumption" checked>
-                    Internal Assumptions <span class="count">(0)</span>
                 </label>
                 <label>
                     <input type="checkbox" id="filter-ExplicitAssertion" checked>
@@ -1456,7 +1452,6 @@ export class DependencyAnalysis {
             const filterState = {
                 'ExplicitAssumption': true,
                 'ImplicitAssumption': true,
-                'InternalAssumption': true,
                 'ExplicitAssertion': true,
                 'ImplicitAssertion': true
             };
@@ -1465,8 +1460,8 @@ export class DependencyAnalysis {
             const categoryCounts = {
                 'ExplicitAssumption': 0,
                 'ImplicitAssumption': 0,
-                'InternalAssumption': 0,
                 'ExplicitAssertion': 0,
+                'ExplicitAssertionPostcondition': 0,
                 'ImplicitAssertion': 0
             };
             
@@ -1482,8 +1477,7 @@ export class DependencyAnalysis {
             // Update count displays
             document.querySelector('#filter-ExplicitAssumption + .count').textContent = '(' + categoryCounts.ExplicitAssumption + ')';
             document.querySelector('#filter-ImplicitAssumption + .count').textContent = '(' + categoryCounts.ImplicitAssumption + ')';
-            document.querySelector('#filter-InternalAssumption + .count').textContent = '(' + categoryCounts.InternalAssumption + ')';
-            document.querySelector('#filter-ExplicitAssertion + .count').textContent = '(' + categoryCounts.ExplicitAssertion + ')';
+            document.querySelector('#filter-ExplicitAssertion + .count').textContent = '(' + (categoryCounts.ExplicitAssertion + categoryCounts.ExplicitAssertionPostcondition) + ')';
             document.querySelector('#filter-ImplicitAssertion + .count').textContent = '(' + categoryCounts.ImplicitAssertion + ')';
             
             // Function to apply filters to nodes
@@ -1516,7 +1510,7 @@ export class DependencyAnalysis {
             }
             
             // Add event listeners to checkboxes
-            const checkboxes = ['ExplicitAssumption', 'ImplicitAssumption', 'InternalAssumption', 'ExplicitAssertion', 'ImplicitAssertion'];
+            const checkboxes = ['ExplicitAssumption', 'ImplicitAssumption', 'ExplicitAssertion', 'ImplicitAssertion'];
             checkboxes.forEach(function(category) {
                 const checkbox = document.getElementById('filter-' + category);
                 checkbox.addEventListener('change', function() {
