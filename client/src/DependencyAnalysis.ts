@@ -1515,6 +1515,7 @@ export class DependencyAnalysis {
                 const checkbox = document.getElementById('filter-' + category);
                 checkbox.addEventListener('change', function() {
                     filterState[category] = this.checked;
+                    enableShowIndirect();
                     applyFilters();
                     // Re-highlight current node to update code view with filtered nodes
                     if (selectedNode && selectedNode.length > 0) {
@@ -1523,12 +1524,23 @@ export class DependencyAnalysis {
                 });
             });
             
+            // Helper to enable indirect mode (called when filters change)
+            function enableShowIndirect() {
+                if (!showIndirect) {
+                    showIndirect = true;
+                    const toggleBtn = document.getElementById('toggleIndirect');
+                    toggleBtn.classList.add('active');
+                    toggleBtn.textContent = 'Hide Indirect';
+                }
+            }
+            
             // Helper function to set all checkboxes
             function setAllCheckboxes(checked) {
                 checkboxes.forEach(function(category) {
                     filterState[category] = checked;
                     document.getElementById('filter-' + category).checked = checked;
                 });
+                enableShowIndirect();
                 applyFilters();
                 // Re-highlight current node to update code view with filtered nodes
                 if (selectedNode && selectedNode.length > 0) {
