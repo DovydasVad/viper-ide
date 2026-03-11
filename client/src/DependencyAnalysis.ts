@@ -287,7 +287,8 @@ export class DependencyAnalysis {
                                 message.lineNumber, 
                                 message.neighbors,
                                 message.indirectNeighbors,
-                                message.showDependents
+                                message.showDependents,
+                                message.centerCodeView ?? false
                             );
                             return;
                         case 'openFile':
@@ -798,7 +799,7 @@ export class DependencyAnalysis {
         }
     }
 
-    private static highlightLines(lineNumber: number, neighbors: number[], indirectNeighbors: number[] = [], showDependents: boolean = false): void {
+    private static highlightLines(lineNumber: number, neighbors: number[], indirectNeighbors: number[] = [], showDependents: boolean = false, centerCodeView: boolean = false): void {
         // Set flag to prevent selection change listener from triggering while updating
         this.isUpdatingHighlights = true;
         
@@ -856,8 +857,10 @@ export class DependencyAnalysis {
             editor.setDecorations(indirectDecoration, indirectLines);
             editor.setDecorations(selectedDecoration, selectedLine);
 
-            // Scroll to the line and focus the editor
-            editor.revealRange(editor.document.lineAt(lineNumber - 1).range, vscode.TextEditorRevealType.InCenter);
+            // Scroll to the line only when triggered by a graph node click
+            if (centerCodeView) {
+                editor.revealRange(editor.document.lineAt(lineNumber - 1).range, vscode.TextEditorRevealType.InCenter);
+            }
             
             const modeText = showDependents ? 'dependents' : 'dependencies';
             Log.log(`Successfully highlighted line ${lineNumber}, ${directLines.length} direct ${modeText}, and ${indirectLines.length} indirect ${modeText}`, LogLevel.LowLevelDebug);
@@ -1383,7 +1386,8 @@ export class DependencyAnalysis {
                         lineNumber: lineNumber,
                         neighbors: directNeighbors,
                         indirectNeighbors: indirectNeighbors,
-                        showDependents: showDependents
+                        showDependents: showDependents,
+                        center: sendMessage === 'centerCodeView'
                     });
                 }
             }
@@ -1804,8 +1808,23 @@ export class DependencyAnalysis {
                     // Track the selected node for toggle button recalculation
                     selectedNode = node;
                     
-                    // Highlight the node and its dependencies
-                    highlightNodeAndDependencies(node, true);
+                    // Highlight the node and its dependencies (with centering)
+                    highlightNodeAndDependencies(node, 'center');
+                    
+                    // Center on the node if it is far from the viewport center
+                    const extent = cy.extent();
+                    const viewportCenter = {
+                        x: (extent.x1 + extent.x2) / 2,
+                        y: (extent.y1 + extent.y2) / 2
+                    };
+                    const nodePosition = node.position();
+                    const viewportWidth = extent.x2 - extent.x1;
+                    const viewportHeight = extent.y2 - extent.y1;
+                    const dx = Math.abs(nodePosition.x - viewportCenter.x) / viewportWidth;
+                    const dy = Math.abs(nodePosition.y - viewportCenter.y) / viewportHeight;
+                    if (Math.sqrt(dx * dx + dy * dy) > 0.45) {
+                        cy.center(node);
+                    }
                 }
             });`;
     }
@@ -1824,28 +1843,8 @@ export class DependencyAnalysis {
                             // Track the selected node for toggle button recalculation
                             selectedNode = node;
                             
-                            // Highlight the node and its dependencies
+                            // Highlight the node and its dependencies (no centering: triggered by code line click)
                             highlightNodeAndDependencies(node, true);
-                            
-                            // Only center if node is far from the viewport center
-                            const extent = cy.extent();
-                            const viewportCenter = {
-                                x: (extent.x1 + extent.x2) / 2,
-                                y: (extent.y1 + extent.y2) / 2
-                            };
-                            const nodePosition = node.position();
-                            const viewportWidth = extent.x2 - extent.x1;
-                            const viewportHeight = extent.y2 - extent.y1;
-                            
-                            // Calculate distance from center as percentage of viewport size
-                            const dx = Math.abs(nodePosition.x - viewportCenter.x) / viewportWidth;
-                            const dy = Math.abs(nodePosition.y - viewportCenter.y) / viewportHeight;
-                            const distanceFromCenter = Math.sqrt(dx * dx + dy * dy);
-                            
-                            // Only center if node is more than 45% away from center
-                            if (distanceFromCenter > 0.45) {
-                                cy.center(node);
-                            }
                         }
                         break;
                 }
@@ -2042,7 +2041,7 @@ async function triggerPrune(uri: vscode.Uri, lineNumbers: number[], mode: 'prune
         return;
     }
     
-    const exportFileName = 'graphExports/pruned.vpr';
+    const exportFileName = 'graphExports/prunedExport.vpr';
     
     DependencyAnalysis.pruneState = {
         lines: lineNumbers,
