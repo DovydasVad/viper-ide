@@ -21,7 +21,7 @@ import { Color } from './StatusBar';
 import { Settings } from './Settings';
 import { restart } from './extension';
 import { ProjectManager } from './ProjectManager';
-import { DependencyAnalysis } from './DependencyAnalysis';
+import { DependencyAnalysis, handlePruneVerificationComplete } from './DependencyAnalysis';
 
 export interface ITask {
     type: TaskType;
@@ -457,6 +457,11 @@ export class VerificationController {
         const projectState = State.getFileState(uri);
         projectState.changed = true;
         projectState.verified = false;
+        // Do not trigger re-verification while a prune operation is in progress
+        if (DependencyAnalysis.pruneState) {
+            Log.log('Skipping auto-verification: prune preview is active', LogLevel.Debug);
+            return;
+        }
         State.addToWorklist(new Task({ type: TaskType.Verify, uri: uri, manuallyTriggered: false }));
     }
 
@@ -797,6 +802,10 @@ export class VerificationController {
                                 State.statusBarItem.update("Verification timed out", Color.WARNING);
                                 Log.log(`Verifying ${params.filename} timed out`, LogLevel.Info);
                                 break;
+                        }
+
+                        if (DependencyAnalysis.pruneState) {
+                            handlePruneVerificationComplete(params.success).catch(err => Log.error(`Prune handling failed: ${err}`));
                         }
 
                         // Notify whoever might be listening

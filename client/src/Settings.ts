@@ -20,6 +20,7 @@ import { readdir } from 'fs/promises';
 import { Helper } from './Helper';
 import { State } from './ExtensionState';
 import { Color } from './StatusBar';
+import { DependencyAnalysis } from './DependencyAnalysis';
 
 
 export class Settings {
@@ -748,13 +749,17 @@ export class Settings {
         const z3Path = await Settings.getZ3Path(location);
         const disableCaching = Settings.getConfiguration("viperServer").disableCaching === true;
         const enableDependencyAnalysis = State.dependencyAnalysis;
+        const pruneState = DependencyAnalysis.pruneState;
+        const pruneArgs = pruneState 
+            ? ` --pruneLines ${pruneState.lines.map(l => l + 1).join(' ')} --pruneExportFileName "${pruneState.exportFileName}"`
+            : '';
         const partiallyReplacedString = verificationStage.customArguments
             // note that we use functions as 2nd argument since we do not want that
             // the special replacement patterns kick in
             .replace("$z3Exe$", () => `"${z3Path}"`) // escape path
             .replace("$disableCaching$", () => disableCaching ? "--disableCaching" : "")
             .replace("$dependencyGraphExport$", () => enableDependencyAnalysis 
-            ? '--disableCaching --disableInfeasibilityChecks --enableDependencyAnalysis --proverArgs "proof=true unsat-core=true" --dependencyAnalysisExportPath "graphExports"'
+            ? '--disableCaching --disableInfeasibilityChecks --enableDependencyAnalysis --proverArgs "proof=true unsat-core=true" --dependencyAnalysisExportPath "graphExports"' + pruneArgs
             : "")
             .replace("$fileToVerify$", () => `"${fileUri.fsPath}"`); // escape path (not used since v3)
 

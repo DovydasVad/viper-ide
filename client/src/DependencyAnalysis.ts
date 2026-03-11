@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { Log } from './Log';
-import { LogLevel } from './ViperProtocol';
+import { LogLevel, Success } from './ViperProtocol';
 import { State } from './ExtensionState';
 import { Helper } from './Helper';
 import { Color } from './StatusBar';
@@ -60,6 +60,16 @@ interface GraphData {
     edges: GraphEdge[];
 }
 
+interface PruneState {
+    lines: number[];                    // 0-indexed line numbers to prune
+    exportFileName: string;             // filename for Silicon to write pruned output
+    mode: 'pruneBelow' | 'pruneReplace';
+    uri: vscode.Uri;                    // file being pruned
+    methodName: string;                 // name of the method
+    methodStartLine: number;            // start line of the method (0-indexed)
+    methodEndLine: number;              // end line of the enclosing method (0-indexed)
+}
+
 export class DependencyAnalysis {
     private static currentPanel: vscode.WebviewPanel | undefined = undefined;
     private static selectionChangeListener: vscode.Disposable | undefined = undefined;
@@ -68,6 +78,9 @@ export class DependencyAnalysis {
     private static highlightsEnabled: boolean = false;
     private static analyzedFileUri: vscode.Uri | undefined = undefined;
     private static isUpdatingHighlights: boolean = false;   // Prevents selection change loops when changing state
+
+    // Prune state: set when a prune action is triggered, cleared after result is handled
+    public static pruneState: PruneState | null = null;
 
     private static getExportDir(fileUri: vscode.Uri): string {
         const workspaceFolder = vscode.workspace.workspaceFolders 
@@ -1862,35 +1875,42 @@ class PruneCodeActionProvider implements vscode.CodeActionProvider {
             return undefined;
         }
 
-        const line = document.lineAt(range.start.line);
-        const lineText = line.text.trim();
+        // Collect all valid prune target lines across all selections.
+        const selections = vscode.window.activeTextEditor?.selections ?? [range];
+        const lineSet = new Set<number>();
+        const pruneLines: number[] = [];
+        for (const sel of selections) {
+            // If a selection ends at column 0, that line is not selected.
+            const endLine = sel.end.character === 0 && sel.end.line > sel.start.line
+                ? sel.end.line - 1 : sel.end.line;
+            
+            for (let i = sel.start.line; i <= endLine; i++) {
+                if (lineSet.has(i))
+                    continue;
+                
+                lineSet.add(i);
+                const lineText = document.lineAt(i).text.trim();
+                if (lineText.startsWith('ensures ') || lineText.startsWith('invariant ') || lineText.startsWith('assert ')) {
+                    pruneLines.push(i);
+                }
+            }
+        }
 
-        // Check if line starts with "method" or "function"
-        if (!lineText.startsWith('method ') && !lineText.startsWith('function ')) {
+        if (pruneLines.length === 0) {
             return undefined;
         }
 
-        // Create the two prune actions
-        const pruneBelowAction = this.createPruneAction(
-            document,
-            range,
-            'Prune (Put Below)',
-            'pruneBelow'
-        );
+        const label = pruneLines.length > 1 ? ` (${pruneLines.length} lines)` : '';
 
-        const pruneReplaceAction = this.createPruneAction(
-            document,
-            range,
-            'Prune (Replace)',
-            'pruneReplace'
-        );
-
-        return [pruneBelowAction, pruneReplaceAction];
+        return [
+            this.createPruneAction(document, pruneLines, `Prune${label} (Put Below)`, 'pruneBelow'),
+            this.createPruneAction(document, pruneLines, `Prune${label} (Replace)`, 'pruneReplace'),
+        ];
     }
 
     private createPruneAction(
         document: vscode.TextDocument,
-        range: vscode.Range,
+        lineNumbers: number[],
         title: string,
         mode: 'pruneBelow' | 'pruneReplace'
     ): vscode.CodeAction {
@@ -1898,7 +1918,7 @@ class PruneCodeActionProvider implements vscode.CodeActionProvider {
         action.command = {
             command: 'viper.pruneMethodOrFunction',
             title: title,
-            arguments: [document.uri, range.start.line, mode]
+            arguments: [document.uri, lineNumbers, mode]
         };
         return action;
     }
@@ -1920,152 +1940,349 @@ export function registerPruneActions(context: vscode.ExtensionContext): void {
     // Register the prune command
     const pruneCommand = vscode.commands.registerCommand(
         'viper.pruneMethodOrFunction',
-        async (uri: vscode.Uri, lineNumber: number, mode: 'pruneBelow' | 'pruneReplace') => {
-            if (mode === 'pruneBelow') {
-                await insertTextBelowMethod(uri, lineNumber);
-            } else {
-                await replaceMethod(uri, lineNumber);
-            }
+        async (uri: vscode.Uri, lineNumbers: number[], mode: 'pruneBelow' | 'pruneReplace') => {
+            await triggerPrune(uri, lineNumbers, mode);
         }
     );
     context.subscriptions.push(pruneCommand);
 }
 
 
-async function replaceMethod(uri: vscode.Uri, startLineNumber: number): Promise<void> {
-    const document = await vscode.workspace.openTextDocument(uri);
-    const editor = await vscode.window.showTextDocument(document);
+function findMethodEndLine(startLine: number, lineCount: number, getLine: (i: number) => string): number {
+    let parenDepth = 0;
+    let braceDepth = 0;
+    let foundBodyBrace = false;
     
-    // Find the opening brace
-    let openBracePos: vscode.Position | undefined;
-    for (let i = startLineNumber; i < document.lineCount; i++) {
+    for (let i = startLine; i < lineCount; i++) {
+        for (const char of getLine(i)) {
+            if (char === '(') {
+                parenDepth++;
+            } else if (char === ')') {
+                parenDepth--;
+            } else if (char === '{' && parenDepth === 0) {
+                braceDepth++;
+                foundBodyBrace = true;
+            } else if (char === '}' && parenDepth === 0) {
+                braceDepth--;
+            }
+        }
+        if (foundBodyBrace && braceDepth === 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+
+/**
+ * Finds information on the method location and name, given a line number
+ * Returns { name, startLine, endLine } (0-indexed) or undefined if not found.
+ */
+async function findEnclosingMethod(uri: vscode.Uri, lineNumber: number): Promise<{ name: string, startLine: number, endLine: number } | undefined> {
+    const document = await vscode.workspace.openTextDocument(uri);
+    
+    // Walk upward from lineNumber to find the method/function/predicate declaration
+    const declarationPattern = /^\s*(method|function)\s+(\w+)/;
+    let declarationLine = -1;
+    let methodName = '';
+    
+    for (let i = lineNumber; i >= 0; i--) {
         const lineText = document.lineAt(i).text;
-        const braceIndex = lineText.indexOf('{');
-        if (braceIndex !== -1) {
-            openBracePos = new vscode.Position(i, braceIndex);
+        const match = lineText.match(declarationPattern);
+        if (match) {
+            declarationLine = i;
+            methodName = match[2];
             break;
         }
     }
     
-    if (!openBracePos) {
-        vscode.window.showErrorMessage('Could not find opening brace for method/function');
+    if (declarationLine < 0) {
+        return undefined;
+    }
+    
+    const endLine = findMethodEndLine(declarationLine, document.lineCount, i => document.lineAt(i).text);
+    if (endLine < 0) {
+        return undefined;
+    }
+    
+    return {
+        name: methodName,
+        startLine: declarationLine,
+        endLine: endLine
+    };
+}
+
+
+/**
+ * Set pruneState and trigger a verification that includes --pruneLines and --pruneExportFileName.
+ */
+async function triggerPrune(uri: vscode.Uri, lineNumbers: number[], mode: 'pruneBelow' | 'pruneReplace'): Promise<void> {
+    if (!State.dependencyAnalysis) {
+        vscode.window.showWarningMessage('Dependency Analysis must be enabled for pruning.');
         return;
     }
     
-    // Find matching closing brace
-    const closeBracePos = await findMatchingBrace(document, openBracePos);
-    if (!closeBracePos) {
-        vscode.window.showErrorMessage('Could not find closing brace for method/function');
+    if (DependencyAnalysis.pruneState) {
+        vscode.window.showWarningMessage('A prune operation is already in progress. Please wait for it to complete.');
         return;
     }
     
-    // Create range from start of method to end of closing brace line
-    const methodStartPosition = new vscode.Position(startLineNumber, 0);
-    const methodEndLine = document.lineAt(closeBracePos.line);
-    const endPosition = new vscode.Position(closeBracePos.line, methodEndLine.text.length);
+    const method = await findEnclosingMethod(uri, lineNumbers[0]);
+    if (!method) {
+        vscode.window.showErrorMessage('Could not find enclosing method for pruning.');
+        return;
+    }
+
+    // Warn if any selected line falls outside the enclosing method (i.e. belongs to a different method)
+    const outsideLines = lineNumbers.filter(l => l < method.startLine || l > method.endLine);
+    if (outsideLines.length > 0) {
+        vscode.window.showWarningMessage(
+            `Selected lines span multiple methods. For pruning, please select lines from a single method.`
+        );
+        return;
+    }
+    
+    const exportFileName = 'graphExports/pruned.vpr';
+    
+    DependencyAnalysis.pruneState = {
+        lines: lineNumbers,
+        exportFileName: exportFileName,
+        mode: mode,
+        uri: uri,
+        methodName: method.name,
+        methodStartLine: method.startLine,
+        methodEndLine: method.endLine
+    };
+    
+    const lineList = lineNumbers.map(l => l + 1).join(', ');
+    Log.log(`Prune triggered: method "${method.name}" (lines ${method.startLine + 1}-${method.endLine + 1}), prune lines [${lineList}], mode: ${mode}`, LogLevel.Info);
+    
+    // Trigger verification — the custom args will include --pruneLines and --pruneExportFileName
+    State.addToWorklist(new Task({ type: TaskType.Verify, uri: uri, manuallyTriggered: true }));
+}
+
+
+/**
+ * Called after verification completes.
+ * On success/verification-failure, reads the pruned file and applies it; otherwise clears state.
+ */
+export async function handlePruneVerificationComplete(success: Success): Promise<void> {
+    const pruneState = DependencyAnalysis.pruneState;
+    if (!pruneState) return;
+
+    if (success !== Success.Success && success !== Success.VerificationFailed) {
+        DependencyAnalysis.pruneState = null;
+        vscode.window.showErrorMessage(`Pruning failed: ${Success[success] ?? 'unknown error'}`);
+        return;
+    }
+
+    try {
+        // Resolve the path to the pruned file relative to the workspace
+        const workspaceFolder = vscode.workspace.workspaceFolders 
+            ? vscode.workspace.workspaceFolders[0].uri.fsPath 
+            : path.dirname(pruneState.uri.fsPath);
+        const prunedFilePath = path.join(workspaceFolder, pruneState.exportFileName);
+        
+        if (!fs.existsSync(prunedFilePath)) {
+            vscode.window.showErrorMessage(`Pruned output file not found: ${prunedFilePath}`);
+            return;
+        }
+        
+        const prunedContent = await readFile(prunedFilePath, 'utf-8');
+        
+        // Find the pruned method in the output by searching for the method declaration
+        let prunedMethod = extractMethodText(prunedContent, pruneState.methodName);
+        if (!prunedMethod) {
+            vscode.window.showErrorMessage(`Could not find method "${pruneState.methodName}" in pruned output.`);
+            return;
+        }
+        
+        const document = await vscode.workspace.openTextDocument(pruneState.uri);
+        const editor = await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
+        
+        if (pruneState.mode === 'pruneBelow') {
+            // Rename the pruned method to avoid duplicate names
+            const newName = getUniquePrunedName(pruneState.methodName, document.getText());
+            prunedMethod = prunedMethod.replace(
+                new RegExp(`(method|function|predicate)(\\s+)${escapeRegex(pruneState.methodName)}\\b`),
+                `$1$2${newName}`
+            );
+        }
+        
+        if (pruneState.mode === 'pruneReplace') {
+            await applyPruneReplace(editor, pruneState, prunedMethod);
+        } else {
+            await applyPruneBelow(editor, pruneState, prunedMethod);
+        }
+        
+        Log.log(`Prune result applied for method "${pruneState.methodName}"`, LogLevel.Info);
+    } catch (error) {
+        Log.error(`Failed to handle prune result: ${error}`);
+        vscode.window.showErrorMessage(`Pruning failed: ${error}`);
+    } finally {
+        DependencyAnalysis.pruneState = null;
+    }
+}
+
+
+/**
+ * Extract a method/function/predicate from file content by name.
+ * Returns the full text of the method (from declaration to closing brace).
+ */
+function extractMethodText(content: string, methodName: string): string | undefined {
+    const lines = content.split('\n');
+    const declarationPattern = new RegExp(`^\\s*(method|function|predicate)\\s+${escapeRegex(methodName)}\\b`);
+    
+    let startLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+        if (declarationPattern.test(lines[i])) {
+            startLine = i;
+            break;
+        }
+    }
+    
+    if (startLine < 0)
+        return undefined;
+    
+    const endLine = findMethodEndLine(startLine, lines.length, i => lines[i]);
+    if (endLine < 0)
+        return undefined;
+    
+    return lines.slice(startLine, endLine + 1).join('\n');
+}
+
+
+function escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+
+/**
+ * Generate a unique pruned name: methodName_pruned, methodName_pruned2, methodName_pruned3, ...
+ */
+function getUniquePrunedName(originalName: string, documentText: string): string {
+    const baseName = `${originalName}_pruned`;
+    if (!documentText.includes(baseName)) {
+        return baseName;
+    }
+
+    let n = 2;
+    while (documentText.includes(`${baseName}${n}`)) {
+        n++;
+    }
+    return `${baseName}${n}`;
+}
+
+
+/**
+ * Replace the original method with the pruned version.
+ */
+async function applyPruneReplace(editor: vscode.TextEditor, pruneState: PruneState, prunedMethod: string): Promise<void> {
+    const document = editor.document;
+    const methodStartPosition = new vscode.Position(pruneState.methodStartLine, 0);
+    const methodEndLine = document.lineAt(pruneState.methodEndLine);
+    const endPosition = new vscode.Position(pruneState.methodEndLine, methodEndLine.text.length);
     const replaceRange = new vscode.Range(methodStartPosition, endPosition);
     
-    // Save the original text for potential undo
+    // Save original text so it could be restored on cancel
     const originalText = document.getText(replaceRange);
     
     // Apply the preview edit
-    const replacementText = 'New method\n\nNew method end';
     const previewSuccess = await editor.edit(editBuilder => {
-        editBuilder.replace(replaceRange, replacementText);
-    }, { undoStopBefore: true, undoStopAfter: false });
+        editBuilder.replace(replaceRange, prunedMethod);
+    });
     
     if (!previewSuccess) {
-        vscode.window.showErrorMessage('Could not create preview');
+        vscode.window.showErrorMessage('Could not create preview of pruned method');
         return;
     }
     
-    // Select the new text to highlight it
-    const newTextEnd = new vscode.Position(methodStartPosition.line + 3, 'New method end'.length);
+    // Calculate end of new text for selection
+    const prunedLines = prunedMethod.split('\n');
+    const newEndLine = pruneState.methodStartLine + prunedLines.length - 1;
+    const newEndChar = prunedLines[prunedLines.length - 1].length;
+    const newTextEnd = new vscode.Position(newEndLine, newEndChar);
+    
     editor.selection = new vscode.Selection(methodStartPosition, newTextEnd);
     editor.revealRange(new vscode.Range(methodStartPosition, newTextEnd), vscode.TextEditorRevealType.InCenter);
     
-    try {
-        // Show confirmation dialog
-        const choice = await vscode.window.showQuickPick(
-            ['Accept: Keep New Method', 'Cancel: Undo Changes'],
-            { placeHolder: 'Preview of replacement shown. Accept or undo?' }
+    const choice = await vscode.window.showQuickPick(
+        ['Accept: Keep Pruned Method', 'Cancel: Undo Changes'],
+        { placeHolder: `Preview of pruned "${pruneState.methodName}" shown. Accept or undo?`, ignoreFocusOut: true }
+    );
+    
+    if (choice?.startsWith('Accept')) {
+        vscode.window.showInformationMessage(`Method "${pruneState.methodName}" pruned successfully`);
+    } else {
+        // Restore original text
+        const currentEndLine = pruneState.methodStartLine + prunedLines.length - 1;
+        const currentEndChar = editor.document.lineAt(currentEndLine).text.length;
+        const currentRange = new vscode.Range(
+            methodStartPosition,
+            new vscode.Position(currentEndLine, currentEndChar)
         );
-        
-        if (choice?.startsWith('Accept')) {
-            // Put edit on the undo stack
-            await editor.edit(() => {}, { undoStopBefore: false, undoStopAfter: true });
-            
-            vscode.window.showInformationMessage('Method replaced successfully');
-        } else {
-            // Undo the preview change
-            await vscode.commands.executeCommand('undo');
-            
-            // Restore cursor position
-            const originalPosition = new vscode.Position(startLineNumber, 0);
-            editor.selection = new vscode.Selection(originalPosition, originalPosition);
-        }
-    } catch (error) {
-        // If something goes wrong, try to undo
-        await vscode.commands.executeCommand('undo');
-        throw error;
+        await editor.edit(editBuilder => {
+            editBuilder.replace(currentRange, originalText);
+        });
+        const originalPosition = new vscode.Position(pruneState.methodStartLine, 0);
+        editor.selection = new vscode.Selection(originalPosition, originalPosition);
     }
 }
 
-
-
-async function findMatchingBrace(document: vscode.TextDocument, openBracePos: vscode.Position): Promise<vscode.Position | undefined> {
-    const editor = await vscode.window.showTextDocument(document);
-    const originalSelection = editor.selection;
-    
-    // Set cursor to opening brace and use VS Code's bracket matching
-    editor.selection = new vscode.Selection(openBracePos, openBracePos);
-    await vscode.commands.executeCommand('editor.action.jumpToBracket');
-    
-    const closeBracePos = editor.selection.active;
-    
-    // Restore original selection
-    editor.selection = originalSelection;
-    
-    return closeBracePos;
-}
 
 /**
- * Finds the end of a method or function and inserts "New method" two lines below it.
+ * Insert the pruned method below the original method.
  */
-async function insertTextBelowMethod(uri: vscode.Uri, startLineNumber: number): Promise<void> {
-    const document = await vscode.workspace.openTextDocument(uri);
-    
-    // Find the opening brace on or after the start line
-    let openBracePos: vscode.Position | undefined;
-    for (let i = startLineNumber; i < document.lineCount; i++) {
-        const lineText = document.lineAt(i).text;
-        const braceIndex = lineText.indexOf('{');
-        if (braceIndex !== -1) {
-            openBracePos = new vscode.Position(i, braceIndex);
-            break;
-        }
-    }
-    
-    if (!openBracePos) {
-        vscode.window.showErrorMessage('Could not find opening brace for method/function');
-        return;
-    }
-    
-    // Use VS Code's bracket matching to find closing brace
-    const closeBracePos = await findMatchingBrace(document, openBracePos);
-    if (!closeBracePos) {
-        vscode.window.showErrorMessage('Could not find closing brace for method/function');
-        return;
-    }
-    
-    const endLineNumber = closeBracePos.line;
-    const insertLineNumber = endLineNumber + 1;
+async function applyPruneBelow(
+    editor: vscode.TextEditor,
+    pruneState: PruneState,
+    prunedMethod: string
+): Promise<void> {
+    const insertLineNumber = pruneState.methodEndLine + 1;
     const insertPosition = new vscode.Position(insertLineNumber, 0);
     
-    const editor = await vscode.window.showTextDocument(document);
-    await editor.edit(editBuilder => {
-        editBuilder.insert(insertPosition, '\nNew method\n\nNew method end\n');
+    const insertText = '\n' + prunedMethod + '\n';
+    
+    const previewSuccess = await editor.edit(editBuilder => {
+        editBuilder.insert(insertPosition, insertText);
     });
+    
+    if (!previewSuccess) {
+        vscode.window.showErrorMessage('Could not insert pruned method');
+        return;
+    }
+    
+    // Highlight the inserted text
+    const insertedStartLine = insertLineNumber + 1; // +1 for the leading \n
+    const prunedLines = prunedMethod.split('\n');
+    const insertedEndLine = insertedStartLine + prunedLines.length - 1;
+    const insertedEndChar = prunedLines[prunedLines.length - 1].length;
+    
+    const insertedStart = new vscode.Position(insertedStartLine, 0);
+    const insertedEnd = new vscode.Position(insertedEndLine, insertedEndChar);
+    
+    editor.selection = new vscode.Selection(insertedStart, insertedEnd);
+    editor.revealRange(new vscode.Range(insertedStart, insertedEnd), vscode.TextEditorRevealType.InCenter);
+    
+    const choice = await vscode.window.showQuickPick(
+        ['Accept: Keep Pruned Method', 'Cancel: Undo Changes'],
+        { placeHolder: `Pruned "${pruneState.methodName}" inserted below. Accept or undo?`, ignoreFocusOut: true }
+    );
+    
+    if (choice?.startsWith('Accept')) {
+        vscode.window.showInformationMessage(`Pruned method "${pruneState.methodName}" inserted`);
+    } else {
+        // Delete the inserted text from the start of inserted content (including leading \n) to the end (including trailing \n)
+        const deleteStart = new vscode.Position(insertLineNumber, 0);
+        const insertedLineCount = insertText.split('\n').length - 1; // number of newlines = lines added
+        const deleteEnd = new vscode.Position(insertLineNumber + insertedLineCount, 0);
+        const deleteRange = new vscode.Range(deleteStart, deleteEnd);
+        await editor.edit(editBuilder => {
+            editBuilder.delete(deleteRange);
+        });
+        const originalPosition = new vscode.Position(pruneState.methodStartLine, 0);
+        editor.selection = new vscode.Selection(originalPosition, originalPosition);
+    }
 }
 
 
