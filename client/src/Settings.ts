@@ -749,6 +749,7 @@ export class Settings {
         const z3Path = await Settings.getZ3Path(location);
         const disableCaching = Settings.getConfiguration("viperServer").disableCaching === true;
         const enableDependencyAnalysis = State.dependencyAnalysis;
+        const toggleVerificationProgress = State.toggleVerificationProgress;
         const pruneState = DependencyAnalysis.pruneState;
         const pruneArgs = pruneState 
             ? ` --pruneLines ${pruneState.lines.map(l => l + 1).join(' ')} --pruneExportFileName "${pruneState.exportFileName}"`
@@ -760,6 +761,9 @@ export class Settings {
             .replace("$disableCaching$", () => disableCaching ? "--disableCaching" : "")
             .replace("$dependencyGraphExport$", () => enableDependencyAnalysis 
             ? '--disableCaching --disableInfeasibilityChecks --enableDependencyAnalysis --proverArgs "proof=true unsat-core=true" --dependencyAnalysisExportPath "graphExports"' + pruneArgs
+            : "")
+            .replace("$verificationProgressExport$", () => toggleVerificationProgress
+            ? '--computeVerificationProgress --computeVerificationProgressFileName "graphExports/joined/progressExport.txt"'
             : "")
             .replace("$fileToVerify$", () => `"${fileUri.fsPath}"`); // escape path (not used since v3)
 

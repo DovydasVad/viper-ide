@@ -52,6 +52,7 @@ export class State {
 
     public static autoVerify = true;
     public static dependencyAnalysis = false;
+    public static toggleVerificationProgress = false;
 
     //status bar
     public static statusBarItem: StatusBar;

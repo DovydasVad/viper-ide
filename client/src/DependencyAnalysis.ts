@@ -70,6 +70,12 @@ interface PruneState {
     methodEndLine: number;              // end line of the enclosing method (0-indexed)
 }
 
+interface VerificationMetrics {
+    specQuality: string;
+    proofQuality: string;
+    overallQuality: string;
+}
+
 export class DependencyAnalysis {
     private static currentPanel: vscode.WebviewPanel | undefined = undefined;
     private static selectionChangeListener: vscode.Disposable | undefined = undefined;
@@ -88,19 +94,24 @@ export class DependencyAnalysis {
             : path.dirname(fileUri.fsPath);
         return path.join(workspaceFolder, 'graphExports', 'joined');
     }
-    
+
     public static async performDependencyAnalysis(fileUri: vscode.Uri): Promise<void> {
         try {
             Log.log(`Starting dependency analysis for ${path.basename(fileUri.fsPath)}`, LogLevel.Info);
             
             const exportDir = await this.exportLinesToCSV(fileUri);
             await this.translateEdgesToLineNumbers(exportDir);
+
+            const metrics = this.parseVerificationProgressFile(exportDir);
+            if (State.toggleVerificationProgress && !metrics) {
+                vscode.window.showWarningMessage('Verification progress was requested but could not be parsed from the output file.');
+            }
             
             // Ensure the opened file is open in the code view before showing the graph (that is, does not replace previously opened graph view)
             const document = await vscode.workspace.openTextDocument(fileUri);
             await vscode.window.showTextDocument(document, vscode.ViewColumn.One, false);
             
-            await this.showDependencyGraph(fileUri, exportDir);
+            await this.showDependencyGraph(fileUri, exportDir, metrics);
             
             // Store the analyzed file and re-enable highlights after successful analysis
             this.analyzedFileUri = fileUri;
@@ -219,7 +230,9 @@ export class DependencyAnalysis {
         }
     }
 
-    public static async showDependencyGraph(fileUri: vscode.Uri, exportDir?: string): Promise<void> {
+
+
+    public static async showDependencyGraph(fileUri: vscode.Uri, exportDir?: string, metrics?: VerificationMetrics | null): Promise<void> {
         try {
             // Get export directory if not provided
             if (!exportDir) {
@@ -271,7 +284,7 @@ export class DependencyAnalysis {
 
             // Load graph data from translated edges CSV
             const graphData = this.loadGraphFromCSV(translatedEdgesPath, fileUri);
-            this.currentPanel.webview.html = this.getWebviewContent(graphData);
+            this.currentPanel.webview.html = this.getWebviewContent(graphData, metrics);
 
             // Handle messages from webview
             this.currentPanel.webview.onDidReceiveMessage(
@@ -368,6 +381,11 @@ export class DependencyAnalysis {
                 // Only clear if switching to a different file (not when focusing webview or same file)
                 if (editor && this.analyzedFileUri && editor.document.uri.fsPath !== this.analyzedFileUri.fsPath) {
                     this.clearHighlights();
+                    this.clearProgressExportFile();
+                    this.currentPanel?.webview.postMessage({
+                        command: 'clearMetrics',
+                        toggleVerificationProgress: State.toggleVerificationProgress
+                    });
                 }
             });
 
@@ -396,7 +414,11 @@ export class DependencyAnalysis {
             this.toggleDependencyAnalysis();
         });
 
-        context.subscriptions.push(showGraphCommand, toggleCommand);
+        const toggleVerificationProgressCommand = vscode.commands.registerCommand('viper.VerificationProgress', () => {
+            this.showVerificationProgress();
+        });
+
+        context.subscriptions.push(showGraphCommand, toggleCommand, toggleVerificationProgressCommand);
         
         // Register prune actions
         registerPruneActions(context);
@@ -429,6 +451,7 @@ export class DependencyAnalysis {
         
         // Trigger reverification when dependency analysis is enabled
         if (newDependencyAnalysisEnabled) {
+            this.clearProgressExportFile();
             const activeFile = Helper.getActiveFileUri();
             if (activeFile && Helper.isViperSourceFile(activeFile[0])) {
                 Log.log("Dependency Analysis enabled - triggering reverification", LogLevel.Info);
@@ -438,6 +461,11 @@ export class DependencyAnalysis {
             // Close the dependency graph panel when dependency analysis is disabled
             if (this.currentPanel) {
                 this.currentPanel.dispose();
+            }
+            // Also disable verification progress if it was on
+            if (State.toggleVerificationProgress) {
+                State.toggleVerificationProgress = false;
+                Log.log('Verification Progress disabled (dependency analysis turned off)', LogLevel.Info);
             }
         }
     }
@@ -900,11 +928,29 @@ export class DependencyAnalysis {
         editor.setDecorations(selectedDecoration, []);
     }
 
-    private static getWebviewContent(graphData: GraphData): string {
+    private static getWebviewContent(graphData: GraphData, metrics?: VerificationMetrics | null): string {
         const styles = this.getStyles();
         const graphScript = this.getGraphScript(graphData);
+        const metricsPanelHtml = /* html */`
+            <div id="metrics-panel">
+                <div class="metrics-title">Verification Progress</div>
+                ${metrics ? /* html */`
+                <div class="metrics-row">
+                    <span class="metrics-label">Specification Quality</span>
+                    <span class="metrics-value">${metrics.specQuality}</span>
+                </div>
+                <div class="metrics-row">
+                    <span class="metrics-label">Proof Quality</span>
+                    <span class="metrics-value">${metrics.proofQuality}</span>
+                </div>
+                <div class="metrics-row">
+                    <span class="metrics-label">Overall Quality</span>
+                    <span class="metrics-value metrics-score">${metrics.overallQuality}</span>
+                </div>` : `
+                <div class="metrics-hint">Run <em>"Viper: toggle verification progress"</em> to compute metrics</div>`}
+            </div>`;
         
-        return `<!DOCTYPE html>
+        return /* html */`<!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
@@ -949,6 +995,7 @@ export class DependencyAnalysis {
             <div id="cy"></div>
             <div id="tooltip"></div>
             <div id="externalDepPopup"></div>
+            ${metricsPanelHtml}
             ${graphScript}
         </body>
         </html>`;
@@ -1150,6 +1197,52 @@ export class DependencyAnalysis {
                 color: #d4d4d4;
                 margin-left: 12px;
                 font-size: 11px;
+            }
+            #metrics-panel {
+                position: absolute;
+                bottom: 16px;
+                left: 16px;
+                background-color: #2d2d30;
+                border: 1px solid #454545;
+                border-radius: 6px;
+                padding: 10px 14px;
+                z-index: 1000;
+                min-width: 180px;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            }
+            .metrics-title {
+                color: #858585;
+                font-size: 10px;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+                margin-bottom: 8px;
+            }
+            .metrics-row {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 16px;
+                padding: 2px 0;
+            }
+            .metrics-label {
+                color: #9d9d9d;
+                font-size: 11px;
+            }
+            .metrics-value {
+                color: #cccccc;
+                font-size: 11px;
+                font-variant-numeric: tabular-nums;
+            }
+            .metrics-score {
+                color: #4ec9b0;
+                font-weight: bold;
+            }
+            .metrics-hint {
+                color: #858585;
+                font-size: 11px;
+                font-style: italic;
+                line-height: 1.4;
             }
         </style>`;
     }
@@ -1847,8 +1940,108 @@ export class DependencyAnalysis {
                             highlightNodeAndDependencies(node, true);
                         }
                         break;
+                    case 'clearMetrics': {
+                        const panel = document.getElementById('metrics-panel');
+                        if (panel) {
+                            if (message.toggleVerificationProgress) {
+                                panel.innerHTML = '<div class="metrics-title">Verification Progress</div><div class="metrics-hint">Switched file. Metrics are being recomputed.</div>';
+                            } else {
+                                panel.innerHTML = '<div class="metrics-title">Verification Progress</div><div class="metrics-hint">Run <em>"Viper: toggle verification progress"</em> to compute metrics</div>';
+                            }
+                        }
+                        break;
+                    }
                 }
             });`;
+    }
+
+    /*
+    ###########################################################################
+    #######################   Verification Progress   ########################
+    ###########################################################################
+    */
+
+    public static showVerificationProgress(): void {
+        if (!State.dependencyAnalysis) {
+            vscode.window.showWarningMessage('Verification Progress requires Dependency Analysis to be enabled first');
+            return;
+        }
+        if (!State.activeBackend) {
+            vscode.window.showWarningMessage('No backend is active yet. Please wait for backend initialization.');
+            return;
+        }
+        if (State.activeBackend.type.toLowerCase() !== 'silicon') {
+            vscode.window.showWarningMessage(
+                'Verification Progress can only be enabled with the Silicon backend. Current backend: ' + State.activeBackend.name
+            );
+            return;
+        }
+
+        State.toggleVerificationProgress = !State.toggleVerificationProgress;
+        State.statusBarItem.update(
+            'Verification Progress is ' + (State.toggleVerificationProgress ? 'on' : 'off'),
+            Color.SUCCESS
+        );
+        Log.log('Verification Progress ' + (State.toggleVerificationProgress ? 'enabled' : 'disabled'), LogLevel.Info);
+
+        if (State.toggleVerificationProgress) {
+            const activeFile = Helper.getActiveFileUri();
+            if (activeFile && Helper.isViperSourceFile(activeFile[0])) {
+                State.addToWorklist(new Task({ type: TaskType.Verify, uri: activeFile[0], manuallyTriggered: true }));
+            }
+        }
+    }
+
+    private static clearProgressExportFile(): void {
+        const workspaceFolder = vscode.workspace.workspaceFolders;
+        if (!workspaceFolder) { return; }
+        const filePath = path.join(workspaceFolder[0].uri.fsPath, 'graphExports', 'joined', 'progressExport.txt');
+        try {
+            if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+                Log.log('Cleared progressExport.txt', LogLevel.Debug);
+            }
+        } catch (error) {
+            Log.log(`Could not clear progressExport.txt: ${error}`, LogLevel.Debug);
+        }
+    }
+
+    private static truncateToThreeDecimals(value: string): string {
+        return value.replace(/(\.\d{3})\d+/, '$1');
+    }
+
+    private static parseVerificationProgressFile(exportDir: string): VerificationMetrics | null {
+        const filePath = path.join(exportDir, 'progressExport.txt');
+        if (!fs.existsSync(filePath)) {
+            return null;
+        }
+        try {
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const lines = content.split('\n');
+
+            // "specQuality = 0.898..."
+            const specMatch = content.match(/^specQuality\s*=\s*(.+)$/m);
+            // "proof quality (Lea): 68.0 / 68 = 1.0" — extract only the final value after '='
+            const leaMatch = content.match(/^proof quality \(Lea\):\s*.+=\s*([\d.]+)/m);
+            // Second-to-last non-empty line: "Peter: 0.898...; Lea: 0.898..."
+            const nonEmpty = lines.map(l => l.trim()).filter(l => l.length > 0);
+            const secondToLastLine = nonEmpty[nonEmpty.length - 2] ?? '';
+            const leaScoreMatch = secondToLastLine.match(/Lea:\s*([\d.]+)/);
+
+            if (!specMatch || !leaMatch || !leaScoreMatch) {
+                Log.log('Could not parse all metrics from verification progress file', LogLevel.Debug);
+                return null;
+            }
+
+            return {
+                specQuality: this.truncateToThreeDecimals(specMatch[1].trim()),
+                proofQuality: this.truncateToThreeDecimals(leaMatch[1].trim()),
+                overallQuality: this.truncateToThreeDecimals(leaScoreMatch[1].trim())
+            };
+        } catch (error) {
+            Log.log(`Failed to parse verification progress file: ${error}`, LogLevel.Debug);
+            return null;
+        }
     }
 }
 
