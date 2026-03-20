@@ -414,7 +414,7 @@ export class DependencyAnalysis {
             this.toggleDependencyAnalysis();
         });
 
-        const toggleVerificationProgressCommand = vscode.commands.registerCommand('viper.VerificationProgress', () => {
+        const toggleVerificationProgressCommand = vscode.commands.registerCommand('viper.toggleVerificationProgress', () => {
             this.showVerificationProgress();
         });
 
