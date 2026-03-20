@@ -124,6 +124,11 @@
 				"category": "Viper"
 			},
 			{
+				"command": "viper.toggleVerificationProgress",
+				"title": "toggle verification progress",
+				"category": "Viper"
+			},
+			{
 				"command": "viper.openLogFile",
 				"title": "open current logFile",
 				"category": "Viper"
@@ -183,6 +188,11 @@
 				},
 				{
 					"command": "viper.showDependencyGraph",
+					"when": "resourceLangId == viper",
+					"group": "Viper"
+				},
+				{
+					"command": "viper.toggleVerificationProgress",
 					"when": "resourceLangId == viper",
 					"group": "Viper"
 				},
@@ -425,7 +435,7 @@
 				},
 				"viper.verificationBackends.symbolicExecution.verificationStage.customArguments": {
 					"type": "string",
-					"default": "--z3Exe $z3Exe$ $disableCaching$ $dependencyGraphExport$",
+					"default": "--z3Exe $z3Exe$ $disableCaching$ $dependencyGraphExport$ $verificationProgressExport$",
 					"description": "The command line arguments used for starting the stage."
 				},
 				"viper.verificationBackends.symbolicExecution.verificationStage.onParsingError": {
