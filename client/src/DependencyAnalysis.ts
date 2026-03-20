@@ -20,7 +20,7 @@ const directDependencyDecoration = vscode.window.createTextEditorDecorationType(
 });
 
 const indirectDependencyDecoration = vscode.window.createTextEditorDecorationType({
-    backgroundColor: '#2b3312',
+    backgroundColor: '#77932230',
     isWholeLine: true
 });
 
@@ -30,7 +30,7 @@ const directDependantDecoration = vscode.window.createTextEditorDecorationType({
 });
 
 const indirectDependantDecoration = vscode.window.createTextEditorDecorationType({
-    backgroundColor: '#332f12',
+    backgroundColor: '#9b8d2330',
     isWholeLine: true
 });
 
