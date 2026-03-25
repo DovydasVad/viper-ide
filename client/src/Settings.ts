@@ -754,17 +754,26 @@ export class Settings {
         const pruneArgs = pruneState 
             ? ` --pruneLines ${pruneState.lines.map(l => l + 1).join(' ')} --pruneExportFileName "${pruneState.exportFileName}"`
             : '';
+
+        // Use an absolute export base path so that Silicon writes to the correct location regardless of working directory
+        const getExportBase = (): string => vscode.workspace.workspaceFolders
+            ? vscode.workspace.workspaceFolders[0].uri.fsPath
+            : pathHelper.dirname(fileUri.fsPath);
         const partiallyReplacedString = verificationStage.customArguments
             // note that we use functions as 2nd argument since we do not want that
             // the special replacement patterns kick in
             .replace("$z3Exe$", () => `"${z3Path}"`) // escape path
             .replace("$disableCaching$", () => disableCaching ? "--disableCaching" : "")
-            .replace("$dependencyGraphExport$", () => enableDependencyAnalysis 
-            ? '--disableCaching --disableInfeasibilityChecks --enableDependencyAnalysis --proverArgs "proof=true unsat-core=true" --dependencyAnalysisExportPath "graphExports"' + pruneArgs
-            : "")
-            .replace("$verificationProgressExport$", () => toggleVerificationProgress
-            ? '--computeVerificationProgress --computeVerificationProgressFileName "graphExports/joined/progressExport.txt"'
-            : "")
+            .replace("$dependencyGraphExport$", () => {
+                if (!enableDependencyAnalysis) return "";
+                const graphExportsAbsPath = pathHelper.join(getExportBase(), 'graphExports');
+                return `--disableCaching --disableInfeasibilityChecks --enableDependencyAnalysis --proverArgs "proof=true unsat-core=true" --dependencyAnalysisExportPath "${graphExportsAbsPath}"` + pruneArgs;
+            })
+            .replace("$verificationProgressExport$", () => {
+                if (!toggleVerificationProgress) return "";
+                const progressFileAbsPath = pathHelper.join(getExportBase(), 'graphExports', 'joined', 'progressExport.txt');
+                return `--computeVerificationProgress --computeVerificationProgressFileName "${progressFileAbsPath}"`;
+            })
             .replace("$fileToVerify$", () => `"${fileUri.fsPath}"`); // escape path (not used since v3)
 
         // Note that we need to passes over the string because `replace` does not allow async replace functions.

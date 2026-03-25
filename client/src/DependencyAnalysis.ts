@@ -2234,7 +2234,10 @@ async function triggerPrune(uri: vscode.Uri, lineNumbers: number[], mode: 'prune
         return;
     }
     
-    const exportFileName = 'graphExports/prunedExport.vpr';
+    const pruneExportBase = vscode.workspace.workspaceFolders
+        ? vscode.workspace.workspaceFolders[0].uri.fsPath
+        : path.dirname(uri.fsPath);
+    const exportFileName = path.join(pruneExportBase, 'graphExports', 'prunedExport.vpr');
     
     DependencyAnalysis.pruneState = {
         lines: lineNumbers,
@@ -2269,11 +2272,8 @@ export async function handlePruneVerificationComplete(success: Success): Promise
     }
 
     try {
-        // Resolve the path to the pruned file relative to the workspace
-        const workspaceFolder = vscode.workspace.workspaceFolders 
-            ? vscode.workspace.workspaceFolders[0].uri.fsPath 
-            : path.dirname(pruneState.uri.fsPath);
-        const prunedFilePath = path.join(workspaceFolder, pruneState.exportFileName);
+        // exportFileName is an absolute path (set in triggerPrune)
+        const prunedFilePath = pruneState.exportFileName;
         
         if (!fs.existsSync(prunedFilePath)) {
             vscode.window.showErrorMessage(`Pruned output file not found: ${prunedFilePath}`);
