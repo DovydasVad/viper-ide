@@ -2153,10 +2153,13 @@ function findMethodEndLine(startLine: number, lineCount: number, getLine: (i: nu
                 parenDepth--;
             } else if (char === '{' && parenDepth === 0) {
                 braceDepth++;
-                foundBodyBrace = true;
             } else if (char === '}' && parenDepth === 0) {
                 braceDepth--;
             }
+        }
+        // Only mark foundBodyBrace if braceDepth is still > 0 after the full line.
+        if (!foundBodyBrace && braceDepth > 0) {
+            foundBodyBrace = true;
         }
         if (foundBodyBrace && braceDepth === 0) {
             return i;
