@@ -2398,6 +2398,8 @@ async function applyPruneReplace(editor: vscode.TextEditor, pruneState: PruneSta
     const newEndChar = prunedLines[prunedLines.length - 1].length;
     const newTextEnd = new vscode.Position(newEndLine, newEndChar);
     
+    // Small delay for the language server to process the didChange before documentHighlight is called
+    await new Promise(resolve => setTimeout(resolve, 100));
     editor.selection = new vscode.Selection(methodStartPosition, newTextEnd);
     editor.revealRange(new vscode.Range(methodStartPosition, newTextEnd), vscode.TextEditorRevealType.InCenter);
     
@@ -2456,6 +2458,8 @@ async function applyPruneBelow(
     const insertedStart = new vscode.Position(insertedStartLine, 0);
     const insertedEnd = new vscode.Position(insertedEndLine, insertedEndChar);
     
+    // Small delay for the language server to process the didChange before documentHighlight is called
+    await new Promise(resolve => setTimeout(resolve, 100));
     editor.selection = new vscode.Selection(insertedStart, insertedEnd);
     editor.revealRange(new vscode.Range(insertedStart, insertedEnd), vscode.TextEditorRevealType.InCenter);
     
