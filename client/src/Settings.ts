@@ -767,12 +767,12 @@ export class Settings {
             .replace("$dependencyGraphExport$", () => {
                 if (!enableDependencyAnalysis) return "";
                 const graphExportsAbsPath = pathHelper.join(getExportBase(), 'graphExports');
-                return `--disableCaching --disableInfeasibilityChecks --enableDependencyAnalysis --proverArgs "proof=true unsat-core=true" --dependencyAnalysisExportPath "${graphExportsAbsPath}"` + pruneArgs;
-            })
-            .replace("$verificationProgressExport$", () => {
-                if (!toggleVerificationProgress) return "";
-                const progressFileAbsPath = pathHelper.join(getExportBase(), 'graphExports', 'joined', 'progressExport.txt');
-                return `--computeVerificationProgress --computeVerificationProgressFileName "${progressFileAbsPath}"`;
+                let args = `--disableCaching --disableInfeasibilityChecks --enableDependencyAnalysis --proverArgs "proof=true unsat-core=true" --dependencyAnalysisExportPath "${graphExportsAbsPath}"` + pruneArgs;
+                if (toggleVerificationProgress) {
+                    const progressFileAbsPath = pathHelper.join(getExportBase(), 'graphExports', 'joined', 'progressExport.txt');
+                    args += ` --computeVerificationProgress --computeVerificationProgressFileName "${progressFileAbsPath}"`;
+                }
+                return args;
             })
             .replace("$fileToVerify$", () => `"${fileUri.fsPath}"`); // escape path (not used since v3)
 

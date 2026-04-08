@@ -1002,7 +1002,7 @@ export class DependencyAnalysis {
     }
 
     private static getStyles(): string {
-        return `<style>
+        return /* CSS */`<style>
             body {
                 margin: 0;
                 padding: 0;

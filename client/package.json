@@ -435,7 +435,7 @@
 				},
 				"viper.verificationBackends.symbolicExecution.verificationStage.customArguments": {
 					"type": "string",
-					"default": "--z3Exe $z3Exe$ $disableCaching$ $dependencyGraphExport$ $verificationProgressExport$",
+					"default": "--z3Exe $z3Exe$ $disableCaching$ $dependencyGraphExport$",
 					"description": "The command line arguments used for starting the stage."
 				},
 				"viper.verificationBackends.symbolicExecution.verificationStage.onParsingError": {
